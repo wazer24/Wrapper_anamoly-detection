@@ -68,3 +68,41 @@ While the pipeline logic and orchestration are fully established, there are a fe
 4. **Automated Application of Fixes**
    - **Current State:** The pipeline provides developer instructions (`PRISMA_INSTRUCTIONS.md`).
    - **To Add:** Allow the AI to automatically run `prisma migrate` or rewrite the TypeScript files using AST manipulation if the confidence score is high enough.
+
+---
+
+## 🧪 Running the Local Prototype
+
+With the recent completion of the live `run_phase_1.py` script using the `google-genai` SDK and the dummy Express API (`server.ts`), you can now run the AI pipeline locally!
+
+### Prerequisites
+
+1. **Python Dependencies**:
+   Install the necessary AI and data validation libraries:
+   ```bash
+   pip install -U google-genai pydantic
+   ```
+2. **Node.js Setup**:
+   Ensure you have installed standard Prisma and Express dependencies (`npm install`).
+3. **Environment Variables**:
+   Export your Gemini API key in your terminal before running the pipeline:
+   ```bash
+   export GEMINI_API_KEY="your_api_key_here"
+   ```
+   *(On Windows PowerShell, use `$env:GEMINI_API_KEY="your_api_key_here"`)*
+
+### Execution Flow
+
+1. **Start the Server**: 
+   Launch the dummy Express API by running:
+   ```bash
+   npx ts-node server.ts
+   ```
+2. **Trigger the Bottleneck**:
+   Send a request to the `/api/posts` endpoint (e.g., via `curl` or your browser). This route contains an intentional N+1 database bottleneck.
+3. **Interception & AI Diagnosis**:
+   - Our Prisma middleware automatically intercepts this inefficient query sequence.
+   - It measures the latency and drops a `slow_query_input.json` payload containing the execution context.
+   - The middleware then automatically executes the Python agent (`run_phase_1.py`).
+4. **View the Results**:
+   The agent's AI-generated diagnosis and resolution plan will immediately appear in the `optimization_artifacts/phase_1_output.json` file.
