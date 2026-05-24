@@ -4,3 +4,4 @@ pg_portable/
 __pycache__/
 *.pyc
 .gemini/
+node_modules
