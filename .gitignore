@@ -1,0 +1,6 @@
+node_modules/
+.venv/
+pg_portable/
+__pycache__/
+*.pyc
+.gemini/
