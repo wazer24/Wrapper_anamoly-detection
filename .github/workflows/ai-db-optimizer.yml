@@ -6,32 +6,125 @@ on:
       - main
       - master
 
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      slow_query:
+        description: 'Optional: paste a raw slow SQL query to analyze'
+        required: false
+        type: string
+
 permissions:
   pull-requests: write
-  contents: read
+  contents: write
+  issues: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '20'
 
 jobs:
-  optimize-database:
+  # =========================================================================
+  #  Job 1: Scan Prisma code for N+1 patterns (static analysis)
+  # =========================================================================
+  scan-for-antipatterns:
+    name: Scan for N+1 Query Patterns
     runs-on: ubuntu-latest
+
+    outputs:
+      has_antipatterns: ${{ steps.scan.outputs.found }}
+      scan_report: ${{ steps.scan.outputs.report }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Scan for N+1 patterns in TypeScript/JavaScript
+        id: scan
+        run: |
+          echo "Scanning for N+1 query anti-patterns..."
+
+          REPORT=""
+          FOUND="false"
+
+          # Pattern 1: for-loop with await findUnique/findFirst inside
+          if grep -rnE 'for\s*\(.*\)\s*\{' --include="*.ts" --include="*.js" -l . 2>/dev/null | \
+             xargs -I{} grep -l 'findUnique\|findFirst' {} 2>/dev/null; then
+            REPORT="$REPORT\n- [CRITICAL] Found for-loop + findUnique/findFirst pattern (N+1 risk)"
+            FOUND="true"
+          fi
+
+          # Pattern 2: findMany without include
+          FIND_MANY_FILES=$(grep -rnl 'findMany' --include="*.ts" --include="*.js" . 2>/dev/null || true)
+          for f in $FIND_MANY_FILES; do
+            if ! grep -q 'include:' "$f" 2>/dev/null; then
+              REPORT="$REPORT\n- [WARNING] $f uses findMany without include (potential N+1 if relations are accessed later)"
+              FOUND="true"
+            fi
+          done
+
+          # Pattern 3: Raw SQL without JOIN on relation tables
+          if grep -rnE 'prisma\.\$queryRaw' --include="*.ts" --include="*.js" . 2>/dev/null | \
+             grep -v 'JOIN' 2>/dev/null; then
+            REPORT="$REPORT\n- [INFO] Raw SQL query found without JOIN — may be intentional"
+          fi
+
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+          # Use a delimiter for multi-line output
+          echo "report<<EOF" >> "$GITHUB_OUTPUT"
+          echo -e "$REPORT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          if [ "$FOUND" = "true" ]; then
+            echo "::warning::N+1 query anti-patterns detected in codebase"
+          else
+            echo "No anti-patterns detected."
+          fi
+
+  # =========================================================================
+  #  Job 2: Run the AI Optimization Pipeline
+  # =========================================================================
+  run-ai-pipeline:
+    name: AI Diagnostician Pipeline
+    runs-on: ubuntu-latest
+    needs: scan-for-antipatterns
+    if: always()
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- Python setup ---
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install psycopg2-binary tabulate colorama
+          pip install -U google-genai pydantic psycopg2-binary tabulate colorama requests
 
-      - name: Set up Node.js
+      # --- Node.js setup ---
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
       - name: Install Node.js dependencies
@@ -40,39 +133,189 @@ jobs:
       - name: Generate Prisma Client
         run: npx prisma generate
 
-      - name: Run Test Suite
-        run: npm run test
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # --- Enable PostgreSQL extensions ---
+      - name: Enable pg_stat_statements and hypopg
+        run: |
+          PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
+            CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+          " || echo "pg_stat_statements not available in this image"
 
-      - name: Post Optimization Recommendations to PR
+          PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
+            CREATE EXTENSION IF NOT EXISTS hypopg;
+          " || echo "hypopg not available — Phase 2 will use simulation mode"
+
+      # --- Run schema migrations ---
+      - name: Apply database schema
+        run: npx prisma db push --accept-data-loss
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+
+      # --- Seed test data for N+1 demonstration ---
+      - name: Seed test data
+        run: |
+          PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
+            INSERT INTO customers (email, full_name)
+            SELECT
+              'user' || g || '@test.com',
+              'Test User ' || g
+            FROM generate_series(1, 100) g
+            ON CONFLICT DO NOTHING;
+
+            INSERT INTO orders (customer_id, status, created_at)
+            SELECT
+              (g % 100) + 1,
+              CASE WHEN g % 3 = 0 THEN 'pending' ELSE 'shipped' END,
+              NOW() - (g || ' hours')::interval
+            FROM generate_series(1, 500) g;
+          "
+
+      # --- Phase 1: AI Diagnostician ---
+      - name: Run Phase 1 — AI Diagnostician
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+        run: |
+          # If there's a manual slow query input, write it
+          if [ -n "${{ github.event.inputs.slow_query }}" ]; then
+            echo '{"raw_query": "${{ github.event.inputs.slow_query }}", "query_count": 1}' \
+              > optimization_artifacts/slow_query_input.json
+          fi
+
+          # If no input exists, create a default N+1 scenario
+          if [ ! -f optimization_artifacts/slow_query_input.json ]; then
+            cat > optimization_artifacts/slow_query_input.json << 'PAYLOAD'
+          {
+            "raw_query": "SELECT * FROM orders WHERE status = 'pending'; [+N individual SELECT * FROM customers WHERE customer_id = ?]",
+            "query_count": 501,
+            "model": "Order",
+            "operation": "findMany + loop(findUnique)",
+            "duration_ms": 1250,
+            "baseline_explain": "Individual queries use PK Index Scan (~1ms each). Total latency is due to 500 sequential network round-trips.",
+            "intercepted_code": "const orders = await prisma.order.findMany({ where: { status: 'pending' } }); for (const order of orders) { order.customer = await prisma.customer.findUnique({ where: { customerId: order.customerId } }); }"
+          }
+          PAYLOAD
+          fi
+
+          python optimization_artifacts/run_phase_1.py
+
+      # --- Phase 2: HypoPG Evaluator ---
+      - name: Run Phase 2 — HypoPG Evaluator
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+        run: python optimization_artifacts/run_phase_2.py
+        continue-on-error: true
+
+      # --- Phase 3: ORM Translator ---
+      - name: Run Phase 3 — ORM Translator
+        run: python optimization_artifacts/run_phase_3.py
+        continue-on-error: true
+
+      # --- Upload artifacts ---
+      - name: Upload optimization artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-optimization-report
+          path: |
+            optimization_artifacts/phase_1_output.json
+            optimization_artifacts/phase_2_output.json
+            optimization_artifacts/phase_3_output.json
+            optimization_artifacts/PRISMA_INSTRUCTIONS.md
+          retention-days: 30
+
+      # --- Post results to PR ---
+      - name: Post AI Optimization Report to PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const path = require('path');
-            
-            const filePath = path.join(process.env.GITHUB_WORKSPACE, 'optimization_artifacts', 'PRISMA_INSTRUCTIONS.md');
-            
-            if (fs.existsSync(filePath)) {
-              const fileContent = fs.readFileSync(filePath, 'utf8').trim();
-              
-              if (fileContent.length > 0) {
-                const prAuthor = context.payload.pull_request.user.login;
-                const commentBody = `### ⚡ AI Database Optimization Report\n\n@${prAuthor}, a slow query was detected and analyzed during the test run. Here are the optimized migration steps:\n\n${fileContent}`;
-                
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.issue.number,
-                  body: commentBody
-                });
-                
-                console.log('Successfully posted optimization recommendations comment to PR.');
-              } else {
-                console.log('PRISMA_INSTRUCTIONS.md exists but is empty. Skipping PR comment.');
+
+            // Read the scan report from the previous job
+            const scanReport = `${{ needs.scan-for-antipatterns.outputs.scan_report }}`;
+
+            // Read Phase 1 diagnosis
+            let phase1Summary = 'Phase 1 output not available.';
+            const p1Path = path.join(process.env.GITHUB_WORKSPACE, 'optimization_artifacts', 'phase_1_output.json');
+            if (fs.existsSync(p1Path)) {
+              try {
+                const p1 = JSON.parse(fs.readFileSync(p1Path, 'utf8'));
+                const diag = p1.diagnosis || {};
+                const winner = p1.winning_hypothesis || {};
+                phase1Summary = [
+                  `| Metric | Value |`,
+                  `|---|---|`,
+                  `| Root Cause | \`${diag.root_cause_category || 'N/A'}\` |`,
+                  `| Is DB Index Problem | ${diag.is_database_index_problem ? 'Yes' : 'No'} |`,
+                  `| Fix Layer | \`${diag.required_fix_layer || 'N/A'}\` |`,
+                  `| Winning Fix | ${winner.label || 'N/A'} |`,
+                  `| Projected Latency | ${winner.projected_latency_ms || '?'}ms |`,
+                  `| Latency Reduction | ${winner.latency_reduction_pct || '?'}% |`,
+                ].join('\n');
+              } catch (e) {
+                phase1Summary = 'Failed to parse phase_1_output.json';
               }
-            } else {
-              console.log('No database optimization recommendations found (PRISMA_INSTRUCTIONS.md does not exist).');
             }
+
+            // Read PRISMA_INSTRUCTIONS.md
+            let instructions = '';
+            const instrPath = path.join(process.env.GITHUB_WORKSPACE, 'optimization_artifacts', 'PRISMA_INSTRUCTIONS.md');
+            if (fs.existsSync(instrPath)) {
+              instructions = fs.readFileSync(instrPath, 'utf8').trim();
+            }
+
+            // Build the comment
+            const prAuthor = context.payload.pull_request.user.login;
+            const body = [
+              `## ⚡ AI Database Optimization Report`,
+              ``,
+              `@${prAuthor}, the AI Database Optimizer has analyzed this PR.`,
+              ``,
+              `### 🔍 Static Analysis (Anti-Pattern Scan)`,
+              scanReport || 'No anti-patterns detected.',
+              ``,
+              `### 🧠 AI Diagnosis (Phase 1 — Gemini)`,
+              phase1Summary,
+              ``,
+              instructions ? `### 📋 Fix Instructions\n\n<details>\n<summary>Click to expand full instructions</summary>\n\n${instructions}\n\n</details>` : '',
+              ``,
+              `---`,
+              `*Generated by [AI Database Optimizer](https://github.com/${context.repo.owner}/${context.repo.repo}) pipeline*`,
+            ].filter(Boolean).join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
+
+            console.log('Posted AI optimization report to PR.');
+
+      # --- Post summary to workflow ---
+      - name: Write Job Summary
+        if: always()
+        run: |
+          echo "## AI Database Optimizer — Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f optimization_artifacts/phase_1_output.json ]; then
+            echo "### Phase 1 Diagnosis" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            python3 -c "
+          import json
+          with open('optimization_artifacts/phase_1_output.json') as f:
+              data = json.load(f)
+          print(json.dumps({
+              'root_cause': data.get('diagnosis', {}).get('root_cause_category'),
+              'fix_layer': data.get('diagnosis', {}).get('required_fix_layer'),
+              'winning_fix': data.get('winning_hypothesis', {}).get('label'),
+              'projected_latency_ms': data.get('winning_hypothesis', {}).get('projected_latency_ms'),
+              'reduction_pct': data.get('winning_hypothesis', {}).get('latency_reduction_pct'),
+          }, indent=2))
+          " >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Phase 1 output not generated." >> $GITHUB_STEP_SUMMARY
+          fi
