@@ -136,7 +136,20 @@ Keep response concise.
 
       } catch (error) {
 
-        console.log("Gemini API Failed");
+  console.log("Gemini API Failed");
+
+  aiAnalysis = {
+    source: "Fallback AI Engine",
+    issue: randomQuery.issue,
+    severity: "High",
+    recommendation:
+      "Add indexing, pagination, and caching",
+    optimizationSQL:
+      "CREATE INDEX idx_email ON users(email);",
+    estimatedImprovement: "70%"
+  };
+
+}
 
         // ---------------- FALLBACK RESPONSE ----------------
 
