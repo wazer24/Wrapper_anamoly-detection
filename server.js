@@ -11,21 +11,26 @@ app.use(express.json());
 
 const PORT = 3000;
 
-// ---------------- GEMINI SETUP ----------------
+// ==========================================
+// GEMINI SETUP
+// ==========================================
 
 const genAI = new GoogleGenerativeAI(
   process.env.GEMINI_API_KEY
 );
 
-// ---------------- SAMPLE QUERIES ----------------
+// ==========================================
+// SAMPLE SQL QUERIES
+// ==========================================
 
 const queries = [
+
   {
     sql: `
       SELECT * FROM users
       WHERE email LIKE '%gmail.com%'
     `,
-    issue: "Missing Index",
+    issue: "Missing Index"
   },
 
   {
@@ -33,7 +38,7 @@ const queries = [
       SELECT * FROM orders
       ORDER BY createdAt DESC
     `,
-    issue: "Full Table Scan",
+    issue: "Full Table Scan"
   },
 
   {
@@ -41,7 +46,7 @@ const queries = [
       SELECT * FROM posts
       WHERE title LIKE '%AI%'
     `,
-    issue: "Inefficient LIKE Query",
+    issue: "Inefficient LIKE Query"
   },
 
   {
@@ -49,36 +54,64 @@ const queries = [
       SELECT * FROM products
       WHERE price > 1000
     `,
-    issue: "No Filtering Index",
+    issue: "No Filtering Index"
   }
+
 ];
 
-// ---------------- HOME ROUTE ----------------
+// ==========================================
+// HOME ROUTE
+// ==========================================
 
 app.get("/", (req, res) => {
 
   res.json({
-    message: "AI Database Optimizer Running 🚀",
-    status: "ACTIVE"
+    success: true,
+    project: "AI-Powered Database Optimizer",
+    status: "ACTIVE",
+    routes: {
+      analyze: "/analyze",
+      health: "/health"
+    }
   });
 
 });
 
-// ---------------- AI ANALYZER ROUTE ----------------
+// ==========================================
+// HEALTH CHECK ROUTE
+// ==========================================
+
+app.get("/health", (req, res) => {
+
+  res.json({
+    status: "healthy",
+    server: "running",
+    ai: "active",
+    timestamp: new Date()
+  });
+
+});
+
+// ==========================================
+// AI ANALYZER ROUTE
+// ==========================================
 
 app.get("/analyze", async (req, res) => {
 
   try {
 
+    const queryId =
+      Math.random().toString(36).substring(2, 10);
+
     const start = Date.now();
 
-    // random query simulation
+    // Random query selection
     const randomQuery =
       queries[Math.floor(Math.random() * queries.length)];
 
     const sqlQuery = randomQuery.sql;
 
-    // simulate slow database
+    // Simulate slow DB query
     await new Promise(resolve =>
       setTimeout(resolve, 2000)
     );
@@ -89,7 +122,9 @@ app.get("/analyze", async (req, res) => {
 
     let aiAnalysis = {};
 
-    // ---------------- DETECT SLOW QUERY ----------------
+    // ==========================================
+    // SLOW QUERY DETECTION
+    // ==========================================
 
     if (queryTime > 1000) {
 
@@ -97,7 +132,9 @@ app.get("/analyze", async (req, res) => {
 
       try {
 
-        // ---------------- GEMINI MODEL ----------------
+        // ==========================================
+        // GEMINI MODEL
+        // ==========================================
 
         const model = genAI.getGenerativeModel({
           model: "gemini-2.0-flash"
@@ -136,61 +173,93 @@ Keep response concise.
 
       } catch (error) {
 
-  console.log("Gemini API Failed");
+        console.log("Gemini API ");
 
-  aiAnalysis = {
-    source: "Fallback AI Engine",
-    issue: randomQuery.issue,
-    severity: "High",
-    recommendation:
-      "Add indexing, pagination, and caching",
-    optimizationSQL:
-      "CREATE INDEX idx_email ON users(email);",
-    estimatedImprovement: "70%"
-  };
-
-}
-
-        // ---------------- FALLBACK RESPONSE ----------------
+        // ==========================================
+        // FALLBACK AI ENGINE
+        // ==========================================
 
         aiAnalysis = {
+
           source: "Fallback AI Engine",
+
           issue: randomQuery.issue,
+
           severity: "High",
+
+          riskScore: 8.5,
+
           recommendation:
             "Add indexing, pagination, and caching",
+
           optimizationSQL:
             "CREATE INDEX idx_email ON users(email);",
-          estimatedImprovement: "70%",
+
+          estimatedImprovement: "70%"
+
         };
 
       }
 
+    } else {
+
+      aiAnalysis = {
+
+        source: "No Issue Detected",
+
+        issue:
+          "Query within acceptable performance range",
+
+        severity: "Low",
+
+        riskScore: 1.0,
+
+        recommendation:
+          "No immediate action required",
+
+        optimizationSQL: null,
+
+        estimatedImprovement: "0%"
+
+      };
+
     }
 
-    // ---------------- FINAL RESPONSE ----------------
+    // ==========================================
+    // FINAL RESPONSE
+    // ==========================================
 
     res.json({
 
       success: true,
 
-      project: "AI-Powered Database Optimizer",
+      queryId,
 
-      slowQueryDetected: true,
+      project:
+        "AI-Powered Database Optimizer",
+
+      slowQueryDetected:
+        queryTime > 1000,
 
       timestamp: new Date(),
 
       performance: {
+
         executionTime: `${queryTime} ms`,
+
         status:
           queryTime > 1000
             ? "CRITICAL"
             : "OPTIMIZED"
+
       },
 
       query: {
+
         database: "PostgreSQL",
+
         sql: sqlQuery
+
       },
 
       aiAnalysis
@@ -202,23 +271,29 @@ Keep response concise.
     console.log(error);
 
     res.status(500).json({
+
       success: false,
+
       error: "Internal Server Error"
+
     });
 
   }
 
 });
 
-// ---------------- SERVER START ----------------
+// ==========================================
+// SERVER START
+// ==========================================
 
 app.listen(PORT, () => {
 
   console.log(`
 ==========================================
-🚀 AI Database Optimizer Running
+ AI Database Optimizer Running
 🌐 Server: http://localhost:${PORT}
-📊 Analyze: http://localhost:${PORT}/analyze
+ Analyze: http://localhost:${PORT}/analyze
+ Health: http://localhost:${PORT}/health
 ==========================================
 `);
 
