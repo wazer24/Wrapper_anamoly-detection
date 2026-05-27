@@ -120,6 +120,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
       - name: Install Python dependencies
         run: |
@@ -137,6 +138,9 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma Client
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
         run: npx prisma generate
 
       # --- Enable PostgreSQL extensions ---
@@ -155,6 +159,7 @@ jobs:
         run: npx prisma db push --accept-data-loss
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
 
       # --- Seed test data for N+1 demonstration ---
       - name: Seed test data
@@ -202,18 +207,18 @@ jobs:
           PAYLOAD
           fi
 
-          python optimization_artifacts/run_phase_1.py
+          python optimization_artifacts/run_phase_1.py || { echo "❌ Phase 1 (AI Diagnostician) crashed. Check uploaded artifacts for details." >> $GITHUB_STEP_SUMMARY; exit 1; }
 
       # --- Phase 2: HypoPG Evaluator ---
       - name: Run Phase 2 — HypoPG Evaluator
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
-        run: python optimization_artifacts/run_phase_2.py
+        run: python optimization_artifacts/run_phase_2.py || echo "⚠️ Phase 2 (HypoPG Evaluator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
         continue-on-error: true
 
       # --- Phase 3: ORM Translator ---
       - name: Run Phase 3 — ORM Translator
-        run: python optimization_artifacts/run_phase_3.py
+        run: python optimization_artifacts/run_phase_3.py || echo "⚠️ Phase 3 (ORM Translator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
         continue-on-error: true
 
       # --- Auto-Commit AI Fixes ---
@@ -235,13 +240,10 @@ jobs:
       # --- Upload artifacts ---
       - name: Upload optimization artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ai-optimization-report
-          path: |
-            optimization_artifacts/phase_1_output.json
-            optimization_artifacts/phase_2_output.json
-            optimization_artifacts/phase_3_output.json
-            optimization_artifacts/PRISMA_INSTRUCTIONS.md
+          path: optimization_artifacts/
           retention-days: 30
 
       # --- Post results to PR ---
