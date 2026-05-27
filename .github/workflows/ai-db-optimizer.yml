@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - master
+    paths:
+      - '**.ts'
+      - '**.js'
+      - '**.prisma'
+      - '**.py'
+      - '**.sql'
 
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
@@ -210,6 +216,22 @@ jobs:
         run: python optimization_artifacts/run_phase_3.py
         continue-on-error: true
 
+      # --- Auto-Commit AI Fixes ---
+      - name: Auto-Commit AI Fixes
+        if: github.event_name == 'pull_request'
+        run: |
+          if ls optimization_artifacts/*.patch 1> /dev/null 2>&1; then
+            echo "Patch file found, applying fixes..."
+            git apply optimization_artifacts/*.patch
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add .
+            git commit -m "🤖 AI Auto-Fix: Applied database optimizations"
+            git push origin HEAD:${{ github.head_ref }}
+          else
+            echo "No patch file generated. Nothing to commit."
+          fi
+
       # --- Upload artifacts ---
       - name: Upload optimization artifacts
         uses: actions/upload-artifact@v4
@@ -301,21 +323,28 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ -f optimization_artifacts/phase_1_output.json ]; then
-            echo "### Phase 1 Diagnosis" >> $GITHUB_STEP_SUMMARY
-            echo '```json' >> $GITHUB_STEP_SUMMARY
             python3 -c "
           import json
-          with open('optimization_artifacts/phase_1_output.json') as f:
-              data = json.load(f)
-          print(json.dumps({
-              'root_cause': data.get('diagnosis', {}).get('root_cause_category'),
-              'fix_layer': data.get('diagnosis', {}).get('required_fix_layer'),
-              'winning_fix': data.get('winning_hypothesis', {}).get('label'),
-              'projected_latency_ms': data.get('winning_hypothesis', {}).get('projected_latency_ms'),
-              'reduction_pct': data.get('winning_hypothesis', {}).get('latency_reduction_pct'),
-          }, indent=2))
+          import sys
+          try:
+              with open('optimization_artifacts/phase_1_output.json') as f:
+                  data = json.load(f)
+              
+              diag = data.get('diagnosis', {})
+              winner = data.get('winning_hypothesis', {})
+              
+              print('### Phase 1 Diagnosis')
+              print('| Metric | Value |')
+              print('|---|---|')
+              print(f'| Root Cause | `{diag.get(\"root_cause_category\", \"N/A\")}` |')
+              print(f'| Before (Latency) | {diag.get(\"estimated_baseline_execution_time_ms\", \"?\")} ms |')
+              print(f'| After (Projected Latency) | {winner.get(\"projected_latency_ms\", \"?\")} ms |')
+              print(f'| Reduction | {winner.get(\"latency_reduction_pct\", \"?\")}% |')
+              print(f'| Fix Layer | `{diag.get(\"required_fix_layer\", \"N/A\")}` |')
+              print(f'| Winning Fix | {winner.get(\"label\", \"N/A\")} |')
+          except Exception as e:
+              print(f'Error parsing Phase 1 output: {e}')
           " >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "Phase 1 output not generated." >> $GITHUB_STEP_SUMMARY
           fi
