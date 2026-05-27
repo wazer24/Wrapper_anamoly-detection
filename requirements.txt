@@ -1,0 +1,22 @@
+# =============================================================================
+# AI Database Optimizer — Python Dependencies
+# =============================================================================
+# Core web framework
+streamlit>=1.38.0
+
+# Phase 1: Gemini AI Diagnostician
+google-genai>=1.0.0
+pydantic>=2.0.0
+
+# Phase 2: HypoPG Evaluator (PostgreSQL driver)
+psycopg2-binary>=2.9.9
+
+# Phase 2: Pretty tables (optional but used by run_phase_2.py)
+tabulate>=0.9.0
+colorama>=0.4.6
+
+# Phase 5: Always-On DBA Daemon (webhook alerts)
+requests>=2.31.0
+
+# Render Workflows SDK (background task orchestration)
+render_sdk

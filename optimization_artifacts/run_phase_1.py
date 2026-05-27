@@ -152,6 +152,93 @@ def read_input() -> dict:
 # ---------------------------------------------------------------------------
 # Main AI Diagnostician
 # ---------------------------------------------------------------------------
+def run_gatekeeper(payload: dict) -> dict | None:
+    payload_size_kb = payload.get('payload_size_kb') or 0
+    rows_returned = payload.get('rows_returned') or 0
+    rows_scanned = payload.get('rows_scanned') or 0
+
+    # Over-fetching Rule
+    if payload_size_kb > 250 and rows_returned < 50:
+        return {
+            "diagnostician_version": "1.0.0",
+            "analysis_timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "raw_query": payload.get('raw_query', ''),
+            "interception_source": payload.get('interception_source', 'gatekeeper'),
+            "query_count_intercepted": payload.get('query_count', 1),
+            "diagnosis": {
+                "root_cause_category": "APPLICATION_LAYER_N_PLUS_1",
+                "is_database_index_problem": False,
+                "primary_bottleneck": "APPLICATION_OVER_FETCHING detected deterministically.",
+                "secondary_bottleneck": f"Payload size is {payload_size_kb}KB for only {rows_returned} rows.",
+                "estimated_baseline_execution_time_ms": payload.get('duration_ms', 0),
+                "database_verdict": "Database is healthy. Application requires payload reduction.",
+                "required_fix_layer": "APPLICATION_CODE"
+            },
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "label": "Prisma Selective Loading via `select: {}`",
+                    "type": "ORM_SELECTIVE_LOAD",
+                    "rationale": "Gatekeeper automatically bypassed LLM. Heavy over-fetching detected.",
+                    "fix_type": "CODE_REWRITE",
+                    "expected_impact": "CRITICAL - Reduces serialization cost and network overhead.",
+                    "affected_layer": "application",
+                    "sql_equivalent": "N/A"
+                }
+            ],
+            "winning_hypothesis": {
+                "id": "H1",
+                "label": "Prisma Selective Loading via `select: {}`",
+                "fix_type": "CODE_REWRITE",
+                "requires_database_migration": False,
+                "requires_index_change": False,
+                "projected_latency_ms": 15.0,
+                "latency_reduction_pct": 80.0
+            }
+        }
+    
+    # Severe Scan Rule
+    if rows_scanned > 10000 and rows_returned < 100:
+        return {
+            "diagnostician_version": "1.0.0",
+            "analysis_timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "raw_query": payload.get('raw_query', ''),
+            "interception_source": payload.get('interception_source', 'gatekeeper'),
+            "query_count_intercepted": payload.get('query_count', 1),
+            "diagnosis": {
+                "root_cause_category": "MISSING_INDEX_OR_OFFSET",
+                "is_database_index_problem": True,
+                "primary_bottleneck": "Severe scan ratio detected deterministically.",
+                "secondary_bottleneck": f"Scanned {rows_scanned} blocks to return {rows_returned} rows.",
+                "estimated_baseline_execution_time_ms": payload.get('duration_ms', 0),
+                "database_verdict": "Database index required.",
+                "required_fix_layer": "DATABASE"
+            },
+            "hypotheses": [
+                {
+                    "id": "H1",
+                    "label": "Generic CREATE INDEX",
+                    "type": "INDEX_BTREE",
+                    "rationale": "Gatekeeper automatically bypassed LLM due to severe block scan ratio.",
+                    "fix_type": "MIGRATION",
+                    "expected_impact": "CRITICAL - Converts sequential scan to index scan.",
+                    "affected_layer": "database",
+                    "sql_equivalent": "CREATE INDEX generic_idx ON table (column);"
+                }
+            ],
+            "winning_hypothesis": {
+                "id": "H1",
+                "label": "Generic CREATE INDEX",
+                "fix_type": "MIGRATION",
+                "requires_database_migration": True,
+                "requires_index_change": True,
+                "projected_latency_ms": 5.0,
+                "latency_reduction_pct": 95.0
+            }
+        }
+    
+    return None
+
 def run_diagnostician():
     log_info("=" * 60)
     log_info("Phase 1 — AI Diagnostician Starting")
@@ -168,6 +255,14 @@ def run_diagnostician():
     query_input = read_input()
     log_info(f"  Query count: {query_input.get('query_count', 'unknown')}")
 
+    # Gatekeeper Check
+    gatekeeper_result = run_gatekeeper(query_input)
+    if gatekeeper_result:
+        log_info("[GATEKEEPER] Issue caught by deterministic heuristics! Bypassing LLM...")
+        OUTPUT_FILE.write_text(json.dumps(gatekeeper_result, indent=2, ensure_ascii=False), encoding="utf-8")
+        log_info(f"Diagnosis written to: {OUTPUT_FILE}")
+        return gatekeeper_result
+
     log_info("Reading Prisma schema for context...")
     schema_context = read_schema()
     log_info(f"  Schema length: {len(schema_context)} chars")
@@ -181,6 +276,11 @@ A slow query was intercepted in production by our Prisma middleware. Analyze the
 ```json
 {json.dumps(query_input, indent=2)}
 ```
+
+## Execution Telemetry
+- Rows Scanned: {query_input.get('rows_scanned', 'N/A')}
+- Rows Returned: {query_input.get('rows_returned', 'N/A')}
+- Payload Size: {query_input.get('payload_size_kb', 'N/A')} KB
 
 ## Current Prisma Schema
 ```prisma

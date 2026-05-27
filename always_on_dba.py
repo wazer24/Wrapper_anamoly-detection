@@ -75,7 +75,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 SCRIPT_DIR          = Path(__file__).parent
 ARTIFACTS_DIR       = SCRIPT_DIR / "optimization_artifacts"
-PHASE1_QUERY_FILE   = ARTIFACTS_DIR / "slow_query_input.txt"   # Written by daemon; read by run_phase_1.py
+PHASE1_QUERY_FILE   = ARTIFACTS_DIR / "slow_query_input.json"   # Written by daemon; read by run_phase_1.py
 PRISMA_MD_FILE      = ARTIFACTS_DIR / "PRISMA_INSTRUCTIONS.md"
 
 PHASE1_SCRIPT = SCRIPT_DIR / "optimization_artifacts" / "run_phase_1.py"
@@ -176,7 +176,9 @@ def fetch_slow_queries(
             mean_exec_time,
             total_exec_time,
             rows,
-            stddev_exec_time
+            stddev_exec_time,
+            shared_blks_read,
+            shared_blks_hit
         FROM pg_stat_statements
         WHERE
             mean_exec_time > %(min_mean_ms)s
@@ -213,7 +215,7 @@ def fetch_slow_queries(
 # ---------------------------------------------------------------------------
 # AI pipeline trigger
 # ---------------------------------------------------------------------------
-def run_ai_pipeline(slow_query: str, db_config: dict) -> bool:
+def run_ai_pipeline(slow_query: dict, db_config: dict) -> bool:
     """
     Write the slow query to a well-known file so run_phase_1.py can pick
     it up, then execute the pipeline stages sequentially via subprocess.run().
@@ -222,7 +224,7 @@ def run_ai_pipeline(slow_query: str, db_config: dict) -> bool:
     # Write query to the handoff file read by run_phase_1.py
     try:
         ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        PHASE1_QUERY_FILE.write_text(slow_query, encoding="utf-8")
+        PHASE1_QUERY_FILE.write_text(json.dumps(slow_query, indent=2), encoding="utf-8")
         log_info(f"Wrote slow query to: {PHASE1_QUERY_FILE.name}")
     except OSError as exc:
         log_error(f"Failed to write query handoff file: {exc}")
@@ -444,7 +446,15 @@ def run_daemon(db_config: dict, webhook_url: str, min_mean_ms: float, min_calls:
 
                 # ── 3. Trigger AI pipeline ────────────────────────────────
                 try:
-                    success = run_ai_pipeline(query_text, db_config)
+                    rows_scanned_proxy = row.get("shared_blks_read", 0) + row.get("shared_blks_hit", 0)
+                    payload = {
+                        "raw_query": query_text,
+                        "duration_ms": mean_ms,
+                        "rows_returned": row.get("rows", 0),
+                        "rows_scanned": rows_scanned_proxy,
+                        "payload_size_kb": None
+                    }
+                    success = run_ai_pipeline(payload, db_config)
                 except Exception as exc:
                     log_error(f"  [{idx}] Unhandled error in AI pipeline: {exc}")
                     success = False
