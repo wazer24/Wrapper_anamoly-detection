@@ -41,7 +41,7 @@ const basePrisma = new PrismaClient({
   ],
 });
 
-const SLOW_THRESHOLD_MS = 500;
+const SLOW_THRESHOLD_MS = 1;
 const ARTIFACTS_DIR = path.join(__dirname, 'optimization_artifacts');
 
 /**
@@ -61,6 +61,9 @@ const prisma = basePrisma.$extends({
             `\n[SLOW QUERY] Model: ${model || 'raw'} | Op: ${operation} | ${duration.toFixed(1)}ms`
           );
 
+          const rowsReturned = Array.isArray(result) ? result.length : (result ? 1 : 0);
+          const payloadSizeKb = parseFloat((Buffer.byteLength(JSON.stringify(result || {})) / 1024).toFixed(2));
+
           // Build the input payload for Phase 1
           const payload = {
             raw_query: `Prisma ${model}.${operation}(${JSON.stringify(args)})`,
@@ -68,9 +71,12 @@ const prisma = basePrisma.$extends({
             model: model || 'unknown',
             operation,
             duration_ms: parseFloat(duration.toFixed(2)),
+            rows_returned: rowsReturned,
+            rows_scanned: null,
+            payload_size_kb: payloadSizeKb,
             timestamp: new Date().toISOString(),
             baseline_explain: `Latency ${duration.toFixed(1)}ms detected by Prisma middleware interceptor.`,
-            intercepted_code: 'See server.ts /api/posts route — N+1 loop pattern.',
+            intercepted_code: 'See server.ts — N+1 loop pattern.',
           };
 
           // Write the payload for the AI agent
@@ -81,9 +87,9 @@ const prisma = basePrisma.$extends({
 
           // Trigger the AI pipeline
           const cmd = [
-            `python3 ${path.join(ARTIFACTS_DIR, 'run_phase_1.py')}`,
-            `python3 ${path.join(ARTIFACTS_DIR, 'run_phase_2.py')}`,
-            `python3 ${path.join(ARTIFACTS_DIR, 'run_phase_3.py')}`,
+            `python ${path.join(ARTIFACTS_DIR, 'run_phase_1.py')}`,
+            `python ${path.join(ARTIFACTS_DIR, 'run_phase_2.py')}`,
+            `python ${path.join(ARTIFACTS_DIR, 'run_phase_3.py')}`,
           ].join(' && ');
 
           console.log(`[INTERCEPTOR] Triggering AI pipeline...`);
@@ -125,6 +131,36 @@ app.get('/', (_req: Request, res: Response) => {
 
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+/**
+ * MISSING INDEX ANTI-PATTERN ROUTE
+ *
+ * Searches by 'email', which is not indexed in the Prisma schema.
+ * As the table grows, this causes a Full Table Scan.
+ */
+app.get('/api/customers', async (req: Request, res: Response) => {
+  try {
+    const startTime = performance.now();
+    
+    // Step 1: Query by a column with no index
+    const emailToSearch = req.query.email || 'user5@test.com';
+    const customer = await (prisma as any).customer.findFirst({
+      where: { email: emailToSearch },
+    });
+
+    const totalTime = performance.now() - startTime;
+
+    res.json({
+      route: '/api/customers',
+      pattern: 'MISSING INDEX (Full Table Scan)',
+      query_count: 1,
+      total_latency_ms: parseFloat(totalTime.toFixed(2)),
+      data: customer,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 /**

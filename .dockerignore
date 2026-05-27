@@ -1,0 +1,16 @@
+# =============================================================================
+#  AI DB Optimizer — Docker ignore
+# =============================================================================
+node_modules
+.git
+.github
+.venv
+.env
+pg_portable
+__pycache__
+*.pyc
+.dockerignore
+Dockerfile
+*.md
+!optimization_artifacts/PRISMA_INSTRUCTIONS.md
+!README.md

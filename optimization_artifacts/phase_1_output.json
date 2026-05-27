@@ -1,79 +1,47 @@
 {
-  "diagnostician_version": "1.0.0",
-  "analysis_timestamp": "2026-05-24T12:27:24+05:30",
-  "raw_query": "SELECT id, title, author_id FROM posts WHERE status = 'PUBLISHED'; [+500 individual SELECT id, name, email FROM authors WHERE id = ?]",
-  "interception_source": "prisma_middleware",
-  "query_count_intercepted": 501,
-  "schema_context": {
-    "tables": {
-      "authors": {
-        "columns": ["id UUID PRIMARY KEY", "name TEXT NOT NULL", "email TEXT UNIQUE NOT NULL"],
-        "existing_indexes": ["PRIMARY KEY (id)", "UNIQUE INDEX ON email"]
-      },
-      "posts": {
-        "columns": ["id UUID PRIMARY KEY", "title TEXT NOT NULL", "status TEXT NOT NULL", "author_id UUID NOT NULL REFERENCES authors(id)"],
-        "existing_indexes": ["PRIMARY KEY (id)", "INDEX ON author_id"]
-      }
-    }
-  },
-  "baseline_explain": {
-    "Analysis": "Individual query execution time is ~1ms using Primary Key Index Scans. Total latency is 1250ms strictly due to network overhead and application-layer iteration loops. Database indexes are functioning perfectly.",
-    "Execution Time": 1250,
-    "Execution Time Unit": "ms",
-    "Planning Time": 0.3,
-    "index_health": "OPTIMAL"
-  },
+  "diagnostician_version": "1.0",
+  "analysis_timestamp": "2024-07-30T12:00:00Z",
+  "raw_query": "Prisma Order.findMany({\"where\":{\"status\":\"pending\"}})",
+  "interception_source": "Prisma middleware",
+  "query_count_intercepted": 1,
   "diagnosis": {
-    "root_cause_category": "APPLICATION_LAYER_N_PLUS_1",
-    "is_database_index_problem": false,
-    "primary_bottleneck": "N+1 Query Pattern: A single API route is issuing 501 discrete database round-trips. One query fetches 500 Post records, then the application iterates and issues 500 individual author lookups inside a for-loop. Each individual query is fast (~1ms on Primary Key), but 500 sequential network round-trips accumulate to ~1250ms of pure latency.",
-    "secondary_bottleneck": "No use of Prisma's built-in `include` (eager loading) or a batching strategy. The ORM's relation resolution capability is being bypassed entirely in favour of a manual loop.",
-    "tertiary_bottleneck": "No in-memory caching layer (e.g., DataLoader pattern). If the same authorId appears across multiple posts, duplicate author queries are issued with no deduplication.",
-    "estimated_baseline_execution_time_ms": 1250,
-    "worst_node": "Application loop: `for (const post of posts) { await prisma.author.findUnique(...) }` — 500 sequential awaits with blocking I/O",
-    "database_verdict": "NO DATABASE CHANGE REQUIRED. Indexes on `posts.author_id` and `authors.id` are optimal. Adding more indexes will produce zero measurable improvement.",
-    "required_fix_layer": "APPLICATION_CODE"
+    "root_cause_category": "MISSING_INDEX",
+    "is_database_index_problem": true,
+    "primary_bottleneck": "The database is performing a full table scan on the 'Order' table to filter by the 'status' column. Since there is no index on 'status', the database must read every row to check the condition, leading to high I/O and CPU usage, especially when the table is large and the matching rows are few or non-existent (as indicated by 0 rows returned).",
+    "secondary_bottleneck": "N/A. While the intercepted code hints at an N+1 pattern, this specific query's slowness is due to a missing index, not an N+1 issue itself (as only one query was intercepted).",
+    "estimated_baseline_execution_time_ms": 2317.85,
+    "database_verdict": "Critical: Query performance is severely degraded due to a missing index on a frequently queried column.",
+    "required_fix_layer": "DATABASE"
   },
   "hypotheses": [
     {
       "id": "H1",
-      "label": "Prisma Eager Loading via `include` (Single JOIN Query)",
-      "type": "ORM_EAGER_LOAD",
-      "rationale": "Replace the 501-query loop with a single Prisma `findMany` call that uses `include: { author: true }`. Prisma translates this to a single SQL LEFT JOIN, fetching all posts and their author data in one round-trip. Eliminates 500 network calls entirely. This is the idiomatic, recommended Prisma solution.",
-      "fix_type": "CODE_REWRITE",
-      "expected_impact": "CRITICAL — Reduces 501 queries to 1. Eliminates ~1200ms of network overhead. Final latency: ~50ms.",
-      "affected_layer": "application",
-      "sql_equivalent": "SELECT p.id, p.title, p.status, p.author_id, a.id, a.name, a.email FROM posts p LEFT JOIN authors a ON p.author_id = a.id WHERE p.status = 'PUBLISHED';"
+      "label": "Add B-tree index on Order.status",
+      "type": "INDEX_BTREE",
+      "rationale": "A B-tree index on the 'status' column will allow the database to quickly locate rows where 'status = 'pending'' without scanning the entire table. This will drastically reduce I/O operations and improve query speed, especially when the selectivity of 'pending' status is low (few pending orders) or when no pending orders exist, as observed.",
+      "fix_type": "MIGRATION",
+      "expected_impact": "Significant latency reduction, from seconds to milliseconds, potentially improving performance by over 98%.",
+      "affected_layer": "database",
+      "sql_equivalent": "CREATE INDEX idx_order_status ON \"Order\" (status);"
     },
     {
       "id": "H2",
-      "label": "Prisma Selective Loading via `include` with `select` (Optimized JOIN)",
-      "type": "ORM_EAGER_LOAD_SELECTIVE",
-      "rationale": "Same as H1 but adds explicit `select` to return only the fields consumed by the client. Avoids over-fetching on both the posts and authors tables. Minimises serialization cost and network payload size. Recommended for production APIs.",
-      "fix_type": "CODE_REWRITE",
-      "expected_impact": "CRITICAL — Same 501→1 query reduction as H1, plus reduced payload and serialization overhead.",
-      "affected_layer": "application",
-      "sql_equivalent": "SELECT p.id, p.title, a.id, a.name, a.email FROM posts p LEFT JOIN authors a ON p.author_id = a.id WHERE p.status = 'PUBLISHED';"
-    },
-    {
-      "id": "H3",
-      "label": "DataLoader Batching Pattern (Deduplication Cache)",
-      "type": "DATALOADER_BATCH",
-      "rationale": "For GraphQL resolvers or deeply nested relation trees where `include` is impractical, implement a DataLoader-style batch function. Collects all unique authorIds from the posts result, fires a single `prisma.author.findMany({ where: { id: { in: uniqueAuthorIds } } })`, then maps results back. Automatically deduplicates repeated authorIds (e.g., if 10 posts share 1 author, only 1 DB lookup is made for that author). Total queries: 2 regardless of post count.",
-      "fix_type": "CODE_REWRITE",
-      "expected_impact": "CRITICAL — Reduces 501 queries to exactly 2. Adds deduplication. Best for dynamic/recursive graphs. ~50-80ms total latency.",
-      "affected_layer": "application",
-      "sql_equivalent": "SELECT id, name, email FROM authors WHERE id IN ('uuid-1', 'uuid-2', ..., 'uuid-N');"
+      "label": "Add composite B-tree index on Order.status, createdAt",
+      "type": "INDEX_BTREE",
+      "rationale": "While the current query only filters on 'status', it's common for order-related queries to also involve 'createdAt' for sorting or range filtering. A composite index on (status, createdAt) would not only optimize the current query (behaving similarly to a single-column index on 'status') but also pre-optimize for future queries that filter by 'status' and then sort or filter by 'createdAt'.",
+      "fix_type": "MIGRATION",
+      "expected_impact": "Significant latency reduction for the current query, similar to H1, with added benefits for potential future queries involving 'createdAt'.",
+      "affected_layer": "database",
+      "sql_equivalent": "CREATE INDEX idx_order_status_createdat ON \"Order\" (status, \"createdAt\");"
     }
   ],
   "winning_hypothesis": {
     "id": "H1",
-    "label": "Prisma Eager Loading via `include`",
-    "fix_type": "CODE_REWRITE",
-    "requires_database_migration": false,
-    "requires_index_change": false,
-    "projected_latency_ms": 50,
-    "latency_reduction_pct": 96.0,
-    "threshold_met": true
+    "label": "Add B-tree index on Order.status",
+    "fix_type": "MIGRATION",
+    "requires_database_migration": true,
+    "requires_index_change": true,
+    "projected_latency_ms": 25,
+    "latency_reduction_pct": 98.92
   }
 }

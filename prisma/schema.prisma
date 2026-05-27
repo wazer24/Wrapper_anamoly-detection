@@ -3,11 +3,22 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model User {
-  id   Int    @id @default(autoincrement())
-  name String
+model Customer {
+  customerId Int     @id @default(autoincrement())
+  email      String
+  full_name  String?
+  orders     Order[]
+}
+
+model Order {
+  id         Int      @id @default(autoincrement())
+  customerId Int
+  status     String
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [customerId])
 }

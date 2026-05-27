@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - master
+    paths:
+      - '**.ts'
+      - '**.js'
+      - '**.prisma'
+      - '**.py'
+      - '**.sql'
 
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
@@ -114,6 +120,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
 
       - name: Install Python dependencies
         run: |
@@ -131,6 +138,9 @@ jobs:
         run: npm ci
 
       - name: Generate Prisma Client
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
         run: npx prisma generate
 
       # --- Enable PostgreSQL extensions ---
@@ -149,19 +159,19 @@ jobs:
         run: npx prisma db push --accept-data-loss
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
 
       # --- Seed test data for N+1 demonstration ---
       - name: Seed test data
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
-            INSERT INTO customers (email, full_name)
+            INSERT INTO \"Customer\" (email, full_name)
             SELECT
               'user' || g || '@test.com',
               'Test User ' || g
-            FROM generate_series(1, 100) g
-            ON CONFLICT DO NOTHING;
+            FROM generate_series(1, 100) g;
 
-            INSERT INTO orders (customer_id, status, created_at)
+            INSERT INTO \"Order\" (\"customerId\", status, \"createdAt\")
             SELECT
               (g % 100) + 1,
               CASE WHEN g % 3 = 0 THEN 'pending' ELSE 'shipped' END,
@@ -196,30 +206,43 @@ jobs:
           PAYLOAD
           fi
 
-          python optimization_artifacts/run_phase_1.py
+          python optimization_artifacts/run_phase_1.py || { echo "❌ Phase 1 (AI Diagnostician) crashed. Check uploaded artifacts for details." >> $GITHUB_STEP_SUMMARY; exit 1; }
 
       # --- Phase 2: HypoPG Evaluator ---
       - name: Run Phase 2 — HypoPG Evaluator
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
-        run: python optimization_artifacts/run_phase_2.py
+        run: python optimization_artifacts/run_phase_2.py || echo "⚠️ Phase 2 (HypoPG Evaluator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
         continue-on-error: true
 
       # --- Phase 3: ORM Translator ---
       - name: Run Phase 3 — ORM Translator
-        run: python optimization_artifacts/run_phase_3.py
+        run: python optimization_artifacts/run_phase_3.py || echo "⚠️ Phase 3 (ORM Translator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
         continue-on-error: true
+
+      # --- Auto-Commit AI Fixes ---
+      - name: Auto-Commit AI Fixes
+        if: github.event_name == 'pull_request'
+        run: |
+          if ls optimization_artifacts/*.patch 1> /dev/null 2>&1; then
+            echo "Patch file found, applying fixes..."
+            git apply optimization_artifacts/*.patch
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add .
+            git commit -m "🤖 AI Auto-Fix: Applied database optimizations"
+            git push origin HEAD:${{ github.head_ref }}
+          else
+            echo "No patch file generated. Nothing to commit."
+          fi
 
       # --- Upload artifacts ---
       - name: Upload optimization artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ai-optimization-report
-          path: |
-            optimization_artifacts/phase_1_output.json
-            optimization_artifacts/phase_2_output.json
-            optimization_artifacts/phase_3_output.json
-            optimization_artifacts/PRISMA_INSTRUCTIONS.md
+          path: optimization_artifacts/
           retention-days: 30
 
       # --- Post results to PR ---
@@ -301,21 +324,28 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ -f optimization_artifacts/phase_1_output.json ]; then
-            echo "### Phase 1 Diagnosis" >> $GITHUB_STEP_SUMMARY
-            echo '```json' >> $GITHUB_STEP_SUMMARY
             python3 -c "
           import json
-          with open('optimization_artifacts/phase_1_output.json') as f:
-              data = json.load(f)
-          print(json.dumps({
-              'root_cause': data.get('diagnosis', {}).get('root_cause_category'),
-              'fix_layer': data.get('diagnosis', {}).get('required_fix_layer'),
-              'winning_fix': data.get('winning_hypothesis', {}).get('label'),
-              'projected_latency_ms': data.get('winning_hypothesis', {}).get('projected_latency_ms'),
-              'reduction_pct': data.get('winning_hypothesis', {}).get('latency_reduction_pct'),
-          }, indent=2))
+          import sys
+          try:
+              with open('optimization_artifacts/phase_1_output.json') as f:
+                  data = json.load(f)
+              
+              diag = data.get('diagnosis', {})
+              winner = data.get('winning_hypothesis', {})
+              
+              print('### Phase 1 Diagnosis')
+              print('| Metric | Value |')
+              print('|---|---|')
+              print(f'| Root Cause | `{diag.get(\"root_cause_category\", \"N/A\")}` |')
+              print(f'| Before (Latency) | {diag.get(\"estimated_baseline_execution_time_ms\", \"?\")} ms |')
+              print(f'| After (Projected Latency) | {winner.get(\"projected_latency_ms\", \"?\")} ms |')
+              print(f'| Reduction | {winner.get(\"latency_reduction_pct\", \"?\")}% |')
+              print(f'| Fix Layer | `{diag.get(\"required_fix_layer\", \"N/A\")}` |')
+              print(f'| Winning Fix | {winner.get(\"label\", \"N/A\")} |')
+          except Exception as e:
+              print(f'Error parsing Phase 1 output: {e}')
           " >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "Phase 1 output not generated." >> $GITHUB_STEP_SUMMARY
           fi
