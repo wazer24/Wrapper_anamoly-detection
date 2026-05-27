@@ -165,14 +165,13 @@ jobs:
       - name: Seed test data
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
-            INSERT INTO customers (email, full_name)
+            INSERT INTO \"Customer\" (email, full_name)
             SELECT
               'user' || g || '@test.com',
               'Test User ' || g
-            FROM generate_series(1, 100) g
-            ON CONFLICT DO NOTHING;
+            FROM generate_series(1, 100) g;
 
-            INSERT INTO orders (customer_id, status, created_at)
+            INSERT INTO \"Order\" (\"customerId\", status, \"createdAt\")
             SELECT
               (g % 100) + 1,
               CASE WHEN g % 3 = 0 THEN 'pending' ELSE 'shipped' END,
