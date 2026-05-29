@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-  Phase 1 — The AI Diagnostician (Gemini-Powered)
-=============================================================================
+  Phase 1 — The AI Diagnostician (Gemini-Powered)  [DEPRECATED]
+  ==============================================================
+  This file is DEPRECATED. The new LangGraph agent (agent_tools/) replaces
+  this. Kept for reference only — will be removed in a future release.
+
+  See: agent_tools/langgraph_agent.py
+# =============================================================================
   Uses the google-genai SDK to analyze intercepted slow queries,
   schema context, and EXPLAIN plans. Outputs a structured JSON
   diagnosis with hypotheses for downstream phases.

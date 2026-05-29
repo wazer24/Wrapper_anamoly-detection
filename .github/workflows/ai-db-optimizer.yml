@@ -1,4 +1,4 @@
-name: AI Database Optimizer CI/CD Interceptor
+name: AI Database Optimizer CI/CD
 
 on:
   pull_request:
@@ -12,7 +12,6 @@ on:
       - '**.py'
       - '**.sql'
 
-  # Allow manual trigger from the Actions tab
   workflow_dispatch:
     inputs:
       slow_query:
@@ -30,9 +29,31 @@ env:
   NODE_VERSION: '20'
 
 jobs:
-  # =========================================================================
-  #  Job 1: Scan Prisma code for N+1 patterns (static analysis)
-  # =========================================================================
+  test-agent:
+    name: Test LangGraph Agent
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install agent dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-agent.txt
+
+      - name: Run agent test suite (golden dataset)
+        run: |
+          python -m pytest tests/test_agent.py -v
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
   scan-for-antipatterns:
     name: Scan for N+1 Query Patterns
     runs-on: ubuntu-latest
@@ -53,14 +74,12 @@ jobs:
           REPORT=""
           FOUND="false"
 
-          # Pattern 1: for-loop with await findUnique/findFirst inside
           if grep -rnE 'for\s*\(.*\)\s*\{' --include="*.ts" --include="*.js" -l . 2>/dev/null | \
              xargs -I{} grep -l 'findUnique\|findFirst' {} 2>/dev/null; then
             REPORT="$REPORT\n- [CRITICAL] Found for-loop + findUnique/findFirst pattern (N+1 risk)"
             FOUND="true"
           fi
 
-          # Pattern 2: findMany without include
           FIND_MANY_FILES=$(grep -rnl 'findMany' --include="*.ts" --include="*.js" . 2>/dev/null || true)
           for f in $FIND_MANY_FILES; do
             if ! grep -q 'include:' "$f" 2>/dev/null; then
@@ -69,14 +88,12 @@ jobs:
             fi
           done
 
-          # Pattern 3: Raw SQL without JOIN on relation tables
           if grep -rnE 'prisma\.\$queryRaw' --include="*.ts" --include="*.js" . 2>/dev/null | \
              grep -v 'JOIN' 2>/dev/null; then
             REPORT="$REPORT\n- [INFO] Raw SQL query found without JOIN — may be intentional"
           fi
 
           echo "found=$FOUND" >> "$GITHUB_OUTPUT"
-          # Use a delimiter for multi-line output
           echo "report<<EOF" >> "$GITHUB_OUTPUT"
           echo -e "$REPORT" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -87,11 +104,8 @@ jobs:
             echo "No anti-patterns detected."
           fi
 
-  # =========================================================================
-  #  Job 2: Run the AI Optimization Pipeline
-  # =========================================================================
   run-ai-pipeline:
-    name: AI Diagnostician Pipeline
+    name: AI Diagnostician Pipeline (Legacy)
     runs-on: ubuntu-latest
     needs: scan-for-antipatterns
     if: always()
@@ -115,19 +129,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- Python setup ---
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
-      - name: Install Python dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -U google-genai pydantic psycopg2-binary tabulate colorama requests
 
-      # --- Node.js setup ---
       - name: Set up Node.js ${{ env.NODE_VERSION }}
         uses: actions/setup-node@v4
         with:
@@ -143,55 +155,71 @@ jobs:
           DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
         run: npx prisma generate
 
-      # --- Enable PostgreSQL extensions ---
       - name: Enable pg_stat_statements and hypopg
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
             CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
           " || echo "pg_stat_statements not available in this image"
-
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
             CREATE EXTENSION IF NOT EXISTS hypopg;
           " || echo "hypopg not available — Phase 2 will use simulation mode"
 
-      # --- Run schema migrations ---
       - name: Apply database schema
         run: npx prisma db push --accept-data-loss
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
           DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
 
-      # --- Seed test data for N+1 demonstration ---
+      - name: Apply agent_memory schema (pgvector)
+        run: |
+          PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
+            CREATE EXTENSION IF NOT EXISTS vector;
+            CREATE SCHEMA IF NOT EXISTS agent_memory;
+            CREATE TABLE IF NOT EXISTS agent_memory.optimization_history (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id VARCHAR(64) NOT NULL,
+                query_text TEXT NOT NULL,
+                query_embedding vector(768) NOT NULL,
+                diagnosis_json JSONB NOT NULL,
+                proposed_fix TEXT,
+                risk_level INT,
+                baseline_cost FLOAT,
+                validated_cost FLOAT,
+                human_feedback VARCHAR(32),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+          "
+
       - name: Seed test data
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
             INSERT INTO \"Customer\" (email, full_name)
-            SELECT
-              'user' || g || '@test.com',
-              'Test User ' || g
+            SELECT 'user' || g || '@test.com', 'Test User ' || g
             FROM generate_series(1, 100) g;
-
             INSERT INTO \"Order\" (\"customerId\", status, \"createdAt\")
-            SELECT
-              (g % 100) + 1,
+            SELECT (g % 100) + 1,
               CASE WHEN g % 3 = 0 THEN 'pending' ELSE 'shipped' END,
               NOW() - (g || ' hours')::interval
             FROM generate_series(1, 500) g;
           "
 
-      # --- Phase 1: AI Diagnostician ---
-      - name: Run Phase 1 — AI Diagnostician
+      - name: Run Agent Test Suite
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PG_HOST: localhost
+          PG_PORT: 5432
+          PG_DBNAME: testdb
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+        run: |
+          python -m pytest tests/test_agent.py -v --tb=short
+
+      - name: Run Phase 1 — AI Diagnostician (Legacy)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+        continue-on-error: true
         run: |
-          # If there's a manual slow query input, write it
-          if [ -n "${{ github.event.inputs.slow_query }}" ]; then
-            echo '{"raw_query": "${{ github.event.inputs.slow_query }}", "query_count": 1}' \
-              > optimization_artifacts/slow_query_input.json
-          fi
-
-          # If no input exists, create a default N+1 scenario
           if [ ! -f optimization_artifacts/slow_query_input.json ]; then
             cat > optimization_artifacts/slow_query_input.json << 'PAYLOAD'
           {
@@ -205,38 +233,18 @@ jobs:
           }
           PAYLOAD
           fi
+          python optimization_artifacts/run_phase_1.py || echo "Phase 1 failed (non-blocking)" >> $GITHUB_STEP_SUMMARY
 
-          python optimization_artifacts/run_phase_1.py || { echo "❌ Phase 1 (AI Diagnostician) crashed. Check uploaded artifacts for details." >> $GITHUB_STEP_SUMMARY; exit 1; }
-
-      # --- Phase 2: HypoPG Evaluator ---
-      - name: Run Phase 2 — HypoPG Evaluator
+      - name: Run Phase 2 — HypoPG Evaluator (Legacy)
+        continue-on-error: true
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
-        run: python optimization_artifacts/run_phase_2.py || echo "⚠️ Phase 2 (HypoPG Evaluator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
+        run: python optimization_artifacts/run_phase_2.py || echo "Phase 2 failed (non-blocking)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Run Phase 3 — ORM Translator (Legacy)
         continue-on-error: true
+        run: python optimization_artifacts/run_phase_3.py || echo "Phase 3 failed (non-blocking)" >> $GITHUB_STEP_SUMMARY
 
-      # --- Phase 3: ORM Translator ---
-      - name: Run Phase 3 — ORM Translator
-        run: python optimization_artifacts/run_phase_3.py || echo "⚠️ Phase 3 (ORM Translator) failed or was bypassed." >> $GITHUB_STEP_SUMMARY
-        continue-on-error: true
-
-      # --- Auto-Commit AI Fixes ---
-      - name: Auto-Commit AI Fixes
-        if: github.event_name == 'pull_request'
-        run: |
-          if ls optimization_artifacts/*.patch 1> /dev/null 2>&1; then
-            echo "Patch file found, applying fixes..."
-            git apply optimization_artifacts/*.patch
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git add .
-            git commit -m "🤖 AI Auto-Fix: Applied database optimizations"
-            git push origin HEAD:${{ github.head_ref }}
-          else
-            echo "No patch file generated. Nothing to commit."
-          fi
-
-      # --- Upload artifacts ---
       - name: Upload optimization artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -245,7 +253,6 @@ jobs:
           path: optimization_artifacts/
           retention-days: 30
 
-      # --- Post results to PR ---
       - name: Post AI Optimization Report to PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -255,10 +262,8 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            // Read the scan report from the previous job
             const scanReport = `${{ needs.scan-for-antipatterns.outputs.scan_report }}`;
 
-            // Read Phase 1 diagnosis
             let phase1Summary = 'Phase 1 output not available.';
             const p1Path = path.join(process.env.GITHUB_WORKSPACE, 'optimization_artifacts', 'phase_1_output.json');
             if (fs.existsSync(p1Path)) {
@@ -281,30 +286,31 @@ jobs:
               }
             }
 
-            // Read PRISMA_INSTRUCTIONS.md
             let instructions = '';
             const instrPath = path.join(process.env.GITHUB_WORKSPACE, 'optimization_artifacts', 'PRISMA_INSTRUCTIONS.md');
             if (fs.existsSync(instrPath)) {
               instructions = fs.readFileSync(instrPath, 'utf8').trim();
             }
 
-            // Build the comment
             const prAuthor = context.payload.pull_request.user.login;
             const body = [
-              `## ⚡ AI Database Optimization Report`,
+              `## AI Database Optimization Report`,
               ``,
               `@${prAuthor}, the AI Database Optimizer has analyzed this PR.`,
               ``,
-              `### 🔍 Static Analysis (Anti-Pattern Scan)`,
+              `### Agent Test Results`,
+              `The new LangGraph agent test suite was executed. See workflow output for details.`,
+              ``,
+              `### Static Analysis (Anti-Pattern Scan)`,
               scanReport || 'No anti-patterns detected.',
               ``,
-              `### 🧠 AI Diagnosis (Phase 1 — Gemini)`,
+              `### AI Diagnosis (Phase 1 — Gemini)`,
               phase1Summary,
               ``,
-              instructions ? `### 📋 Fix Instructions\n\n<details>\n<summary>Click to expand full instructions</summary>\n\n${instructions}\n\n</details>` : '',
+              instructions ? `### Fix Instructions\n\n<details>\n<summary>Click to expand full instructions</summary>\n\n${instructions}\n\n</details>` : '',
               ``,
               `---`,
-              `*Generated by [AI Database Optimizer](https://github.com/${context.repo.owner}/${context.repo.repo}) pipeline*`,
+              `*Generated by AI Database Optimizer pipeline*`,
             ].filter(Boolean).join('\n');
 
             await github.rest.issues.createComment({
@@ -314,38 +320,10 @@ jobs:
               body: body,
             });
 
-            console.log('Posted AI optimization report to PR.');
-
-      # --- Post summary to workflow ---
       - name: Write Job Summary
         if: always()
         run: |
           echo "## AI Database Optimizer — Run Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-
-          if [ -f optimization_artifacts/phase_1_output.json ]; then
-            python3 -c "
-          import json
-          import sys
-          try:
-              with open('optimization_artifacts/phase_1_output.json') as f:
-                  data = json.load(f)
-              
-              diag = data.get('diagnosis', {})
-              winner = data.get('winning_hypothesis', {})
-              
-              print('### Phase 1 Diagnosis')
-              print('| Metric | Value |')
-              print('|---|---|')
-              print(f'| Root Cause | `{diag.get(\"root_cause_category\", \"N/A\")}` |')
-              print(f'| Before (Latency) | {diag.get(\"estimated_baseline_execution_time_ms\", \"?\")} ms |')
-              print(f'| After (Projected Latency) | {winner.get(\"projected_latency_ms\", \"?\")} ms |')
-              print(f'| Reduction | {winner.get(\"latency_reduction_pct\", \"?\")}% |')
-              print(f'| Fix Layer | `{diag.get(\"required_fix_layer\", \"N/A\")}` |')
-              print(f'| Winning Fix | {winner.get(\"label\", \"N/A\")} |')
-          except Exception as e:
-              print(f'Error parsing Phase 1 output: {e}')
-          " >> $GITHUB_STEP_SUMMARY
-          else
-            echo "Phase 1 output not generated." >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "### Agent Test Suite" >> $GITHUB_STEP_SUMMARY
+          echo "LangGraph agent test run completed. Check pytest output above." >> $GITHUB_STEP_SUMMARY

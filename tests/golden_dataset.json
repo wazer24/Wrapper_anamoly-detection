@@ -1,0 +1,282 @@
+[
+    {
+        "id": "gd_001",
+        "description": "N+1 query pattern on orders and customers",
+        "input_payload": {
+            "tenant_id": "test_tenant",
+            "query_text": "Prisma customer.findUnique({\"where\":{\"customerId\":123}})",
+            "params": "{\"where\":{\"customerId\":123}}",
+            "duration_ms": "5.5"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { customer: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_002",
+        "description": "Missing index on email column",
+        "input_payload": {
+            "tenant_id": "test_tenant",
+            "query_text": "Prisma customer.findFirst({\"where\":{\"email\":\"test@test.com\"}})",
+            "params": "{\"where\":{\"email\":\"test@test.com\"}}",
+            "duration_ms": "120.5"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([email])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_003",
+        "description": "N+1 query on users and posts",
+        "input_payload": {
+            "tenant_id": "test_tenant",
+            "query_text": "SELECT * FROM users; for each user: SELECT * FROM posts WHERE author_id = ?",
+            "params": "{}",
+            "duration_ms": "850.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { posts: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_004",
+        "description": "Missing index on order status column",
+        "input_payload": {
+            "tenant_id": "test_tenant",
+            "query_text": "SELECT * FROM \"Order\" WHERE status = 'pending'",
+            "params": "{\"where\":{\"status\":\"pending\"}}",
+            "duration_ms": "340.2"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([status])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_005",
+        "description": "Missing index on customer email for login lookup",
+        "input_payload": {
+            "tenant_id": "acme_corp",
+            "query_text": "SELECT id, email, full_name FROM \"Customer\" WHERE email = 'user@example.com'",
+            "params": "{\"where\":{\"email\":\"user@example.com\"}}",
+            "duration_ms": "210.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([email])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_006",
+        "description": "N+1 query in GraphQL resolver pattern",
+        "input_payload": {
+            "tenant_id": "test_tenant",
+            "query_text": "order.findMany -> for each order: order.customer.findUnique",
+            "params": "{}",
+            "duration_ms": "1200.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { customer: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_007",
+        "description": "Missing composite index on (tenant_id, created_at)",
+        "input_payload": {
+            "tenant_id": "saas_app",
+            "query_text": "SELECT * FROM events WHERE tenant_id = 42 AND created_at > '2026-01-01'",
+            "params": "{\"where\":{\"tenant_id\":42,\"created_at\":{\"gt\":\"2026-01-01\"}}}",
+            "duration_ms": "560.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([tenantId, createdAt])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_008",
+        "description": "Missing index on foreign key customerId",
+        "input_payload": {
+            "tenant_id": "ecommerce",
+            "query_text": "SELECT * FROM \"Order\" WHERE \"customerId\" = 42",
+            "params": "{\"where\":{\"customerId\":42}}",
+            "duration_ms": "180.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([customerId])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_009",
+        "description": "N+1 query on product categories",
+        "input_payload": {
+            "tenant_id": "shopify_clone",
+            "query_text": "category.findMany -> for each category: category.products.findMany",
+            "params": "{}",
+            "duration_ms": "950.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { products: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_010",
+        "description": "JOIN without index on join column",
+        "input_payload": {
+            "tenant_id": "analytics",
+            "query_text": "SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.email = 'test@test.com'",
+            "params": "{}",
+            "duration_ms": "420.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([customerId])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_011",
+        "description": "Slow aggregate query with missing index",
+        "input_payload": {
+            "tenant_id": "finance",
+            "query_text": "SELECT status, COUNT(*) FROM \"Order\" GROUP BY status",
+            "params": "{\"where\":{}}",
+            "duration_ms": "275.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([status])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_012",
+        "description": "N+1 query in REST API serialization",
+        "input_payload": {
+            "tenant_id": "blog_platform",
+            "query_text": "Post.findMany -> for each post: post.comments.findMany",
+            "params": "{}",
+            "duration_ms": "1500.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { comments: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_013",
+        "description": "Missing index on date range query",
+        "input_payload": {
+            "tenant_id": "logs_service",
+            "query_text": "SELECT * FROM logs WHERE created_at BETWEEN '2026-01-01' AND '2026-05-30'",
+            "params": "{\"where\":{\"created_at\":{\"between\":[\"2026-01-01\",\"2026-05-30\"]}}}",
+            "duration_ms": "890.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([createdAt])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_014",
+        "description": "Missing index on order by clause causing sort",
+        "input_payload": {
+            "tenant_id": "marketplace",
+            "query_text": "SELECT * FROM products ORDER BY price DESC LIMIT 20",
+            "params": "{\"orderBy\":{\"price\":\"desc\"}}",
+            "duration_ms": "310.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([price(sort: Desc)])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_015",
+        "description": "Slow query with LIKE pattern (no index support)",
+        "input_payload": {
+            "tenant_id": "search_app",
+            "query_text": "SELECT * FROM \"User\" WHERE name LIKE '%John%'",
+            "params": "{\"where\":{\"name\":{\"contains\":\"John\"}}}",
+            "duration_ms": "650.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([name])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_016",
+        "description": "N+1 query on invoices and line items",
+        "input_payload": {
+            "tenant_id": "billing",
+            "query_text": "invoice.findMany -> for each invoice: invoice.lineItems.findMany",
+            "params": "{}",
+            "duration_ms": "2100.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "include: { lineItems: true }",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_017",
+        "description": "Missing index on status + date composite",
+        "input_payload": {
+            "tenant_id": "scheduler",
+            "query_text": "SELECT * FROM jobs WHERE status = 'pending' AND scheduled_at < NOW()",
+            "params": "{\"where\":{\"status\":\"pending\",\"scheduled_at\":{\"lt\":\"now\"}}}",
+            "duration_ms": "430.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([status, scheduledAt])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_018",
+        "description": "Query causing sequential scan on large table",
+        "input_payload": {
+            "tenant_id": "social_media",
+            "query_text": "SELECT * FROM posts WHERE author_id = 42 ORDER BY created_at DESC",
+            "params": "{\"where\":{\"author_id\":42},\"orderBy\":{\"created_at\":\"desc\"}}",
+            "duration_ms": "780.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([authorId, createdAt(sort: Desc)])",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_019",
+        "description": "N+1 query with DataLoader alternative needed",
+        "input_payload": {
+            "tenant_id": "api_gateway",
+            "query_text": "users.map(u => db.user.findUnique({ where: { id: u.referrer_id } }))",
+            "params": "{}",
+            "duration_ms": "3200.0"
+        },
+        "expected_risk_level": 2,
+        "expected_fix_type": "code_rewrite",
+        "expected_code_patch": "DataLoader or IN-batch",
+        "expected_min_cost_reduction": 10.0
+    },
+    {
+        "id": "gd_020",
+        "description": "Query without WHERE clause on large table",
+        "input_payload": {
+            "tenant_id": "backoffice",
+            "query_text": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100",
+            "params": "{\"orderBy\":{\"created_at\":\"desc\"},\"take\":100}",
+            "duration_ms": "1150.0"
+        },
+        "expected_risk_level": 1,
+        "expected_fix_type": "index_addition",
+        "expected_code_patch": "@@index([createdAt(sort: Desc)])",
+        "expected_min_cost_reduction": 10.0
+    }
+]
