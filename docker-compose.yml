@@ -1,0 +1,108 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-hypopg.sh:/docker-entrypoint-initdb.d/init-hypopg.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.22
+    ports:
+      - "7233:7233"
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-admin:
+    image: temporalio/admin-tools:1.22
+    depends_on:
+      - temporal
+    profiles:
+      - debug
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      REDIS_URL: redis://redis:6379
+      TENANT_ID: docker_tenant
+      TEMPORAL_HOST: temporal:7233
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  agent-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DBNAME: postgres
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      REDIS_URL: redis://redis:6379
+      TEMPORAL_HOST: temporal:7233
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      NEMOTRON_API_KEY: ${NEMOTRON_API_KEY:-}
+      NEMOTRON_ENDPOINT: ${NEMOTRON_ENDPOINT:-http://nemotron:8000/v1}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+
+  nemotron:
+    image: nvcr.io/nvidia/nim/nemotron-mini:latest
+    ports:
+      - "8000:8000"
+    environment:
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    profiles:
+      - nemotron
+
+volumes:
+  pgdata:

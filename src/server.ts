@@ -1,6 +1,6 @@
 /**
  * =============================================================================
- *   server.ts — Dummy Express API with Intentional N+1 Bottleneck
+ *   server.ts — Express API with Intentional N+1 Bottleneck + HITL Approval
  * =============================================================================
  *
  *   This is a demonstration Express server that simulates a real API route
@@ -9,12 +9,14 @@
  *
  *     1. Execute the N+1 loop (deliberately slow)
  *     2. Detect the latency exceeds 500ms
- *     3. Write slow_query_input.json
- *     4. Trigger run_phase_1.py -> run_phase_2.py -> run_phase_3.py
+ *     3. Queue the slow query event to Redis for the agent worker
+ *
+ *   Also exposes approval endpoints for human-in-the-loop (Phase 5).
  *
  *   Usage:
  *     npx ts-node server.ts
  *     curl http://localhost:3000/api/posts
+ *     curl -X POST http://localhost:3000/api/approve/0 -H "Content-Type: application/json" -d '{"status":"APPROVED"}'
  *
  *   Prerequisites:
  *     npm install express @types/express ts-node typescript @prisma/client
@@ -24,12 +26,18 @@
 import express, { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { performance } from 'perf_hooks';
-import { exec } from 'child_process';
+import { createClient } from 'redis';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const app = express();
+app.use(express.json());
 const PORT = process.env.PORT || 3000;
+
+// Initialize Redis Client for event streaming
+const redisClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+redisClient.on('error', (err) => console.error('[REDIS ERROR]', err));
+redisClient.connect().catch(console.error);
 
 // ---------------------------------------------------------------------------
 // Prisma Client with slow-query interception built in
@@ -42,7 +50,7 @@ const basePrisma = new PrismaClient({
 });
 
 const SLOW_THRESHOLD_MS = 1;
-const ARTIFACTS_DIR = path.join(__dirname, 'optimization_artifacts');
+const ARTIFACTS_DIR = path.join(__dirname, '..', 'optimization_artifacts');
 
 /**
  * Extended Prisma client that intercepts every operation,
@@ -79,32 +87,25 @@ const prisma = basePrisma.$extends({
             intercepted_code: 'See server.ts — N+1 loop pattern.',
           };
 
-          // Write the payload for the AI agent
-          const inputFile = path.join(ARTIFACTS_DIR, 'slow_query_input.json');
-          fs.mkdirSync(ARTIFACTS_DIR, { recursive: true });
-          fs.writeFileSync(inputFile, JSON.stringify(payload, null, 2), 'utf-8');
-          console.log(`[INTERCEPTOR] Wrote payload to ${inputFile}`);
+          // ---------------------------------------------------------
+          // PHASE 1 UPGRADE: Event-Driven Ingestion via Redis Streams
+          // ---------------------------------------------------------
+          const tenantId = process.env.TENANT_ID || 'default_tenant';
+          const streamPayload = {
+            query_text: payload.raw_query,
+            params: JSON.stringify(args),
+            duration_ms: payload.duration_ms.toString(),
+            tenant_id: tenantId,
+            full_payload: JSON.stringify(payload) // Preserve full context for Agent Worker
+          };
 
-          // Trigger the AI pipeline
-          const cmd = [
-            `python ${path.join(ARTIFACTS_DIR, 'run_phase_1.py')}`,
-            `python ${path.join(ARTIFACTS_DIR, 'run_phase_2.py')}`,
-            `python ${path.join(ARTIFACTS_DIR, 'run_phase_3.py')}`,
-          ].join(' && ');
-
-          console.log(`[INTERCEPTOR] Triggering AI pipeline...`);
-          exec(
-            cmd,
-            { env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-            (error, stdout, stderr) => {
-              if (error) {
-                console.error(`[PIPELINE ERROR] ${error.message}`);
-                return;
-              }
-              if (stderr) console.warn(`[PIPELINE STDERR]\n${stderr}`);
-              console.log(`[PIPELINE DONE]\n${stdout}`);
-            }
-          );
+          redisClient.xAdd('slow_queries', '*', streamPayload)
+            .then((messageId) => {
+              console.log(\`[INTERCEPTOR] Queued slow query event to Redis stream 'slow_queries' (ID: \${messageId})\`);
+            })
+            .catch((err) => {
+              console.error(\`[INTERCEPTOR ERROR] Failed to queue event to Redis: \${err.message}\`);
+            });
         }
 
         return result;
@@ -124,6 +125,9 @@ app.get('/', (_req: Request, res: Response) => {
     endpoints: {
       '/api/posts': 'GET — Triggers N+1 bottleneck (slow, for testing)',
       '/api/posts/optimized': 'GET — Uses Prisma include (fast, fixed)',
+      '/api/customers': 'GET — Missing index (full table scan)',
+      '/api/approve/:requestId': 'POST — Approve or deny a fix (HITL)',
+      '/api/approval/:requestId': 'GET — Check approval request status',
       '/api/health': 'GET — Health check',
     },
   });
@@ -233,6 +237,82 @@ app.get('/api/posts/optimized', async (_req: Request, res: Response) => {
 
 
 // ---------------------------------------------------------------------------
+// HITL Approval Endpoints (Phase 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/approve/:requestId
+ *
+ * Sets the approval status for a pending approval request.
+ * The agent worker polls this status to resume the interrupted LangGraph.
+ *
+ * Body: { "status": "APPROVED" | "DENIED" }
+ */
+app.post('/api/approve/:requestId', async (req: Request, res: Response) => {
+  try {
+    const requestId = parseInt(req.params.requestId, 10);
+    if (isNaN(requestId)) {
+      res.status(400).json({ status: 'error', message: 'Invalid requestId' });
+      return;
+    }
+
+    const { status } = req.body;
+    if (status !== 'APPROVED' && status !== 'DENIED') {
+      res.status(400).json({ status: 'error', message: "Status must be 'APPROVED' or 'DENIED'" });
+      return;
+    }
+
+    // Use Temporal signal if workflow ID is known; otherwise fall back to in-memory
+    const workflowId = `optimize-${process.env.TENANT_ID || 'default'}-${requestId}`;
+    const temporalHost = process.env.TEMPORAL_HOST || 'localhost:7233';
+
+    try {
+      const { Client } = await import('@temporalio/client');
+      const temporalClient = new Client({ identity: 'server-ts' });
+      const handle = temporalClient.workflow.getHandle(workflowId);
+      await handle.signal('approve_signal', status === 'APPROVED');
+      console.log(`[APPROVAL] Signaled workflow ${workflowId} with ${status}`);
+    } catch (signalErr) {
+      // Fallback: store approval in Redis for the worker to poll
+      try {
+        await redisClient.set(`approval:${requestId}`, status);
+        console.log(`[APPROVAL] Stored approval ${status} for request ${requestId} in Redis`);
+      } catch (redisErr) {
+        console.error(`[APPROVAL] Failed to store approval in Redis: ${redisErr}`);
+      }
+    }
+
+    res.json({ status: 'ok', request_id: requestId, decision: status });
+  } catch (error: any) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+/**
+ * GET /api/approval/:requestId
+ *
+ * Returns the current status of an approval request.
+ */
+app.get('/api/approval/:requestId', async (req: Request, res: Response) => {
+  try {
+    const requestId = parseInt(req.params.requestId, 10);
+    if (isNaN(requestId)) {
+      res.status(400).json({ status: 'error', message: 'Invalid requestId' });
+      return;
+    }
+
+    const redisStatus = await redisClient.get(`approval:${requestId}`);
+    res.json({
+      status: redisStatus ? 'ok' : 'pending',
+      request_id: requestId,
+      decision: redisStatus || 'pending',
+    });
+  } catch (error: any) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 app.listen(PORT, () => {
@@ -247,6 +327,9 @@ app.listen(PORT, () => {
     GET /api/health             — Health check
     GET /api/posts              — N+1 bottleneck (triggers AI agent)
     GET /api/posts/optimized    — Fixed version (single JOIN)
+    GET /api/customers          — Missing index (full table scan)
+    POST /api/approve/:id       — HITL: approve/deny a fix
+    GET  /api/approval/:id      — HITL: check approval status
 
   The Prisma middleware interceptor is ACTIVE.
   Any query >500ms will trigger the AI optimization pipeline.
