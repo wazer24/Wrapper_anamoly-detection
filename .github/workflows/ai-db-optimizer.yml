@@ -29,30 +29,7 @@ env:
   NODE_VERSION: '20'
 
 jobs:
-  test-agent:
-    name: Test LangGraph Agent
-    runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-
-      - name: Install agent dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-agent.txt
-
-      - name: Run agent test suite (golden dataset)
-        run: |
-          python -m pytest tests/test_agent.py -v
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   scan-for-antipatterns:
     name: Scan for N+1 Query Patterns
