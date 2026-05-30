@@ -17,11 +17,11 @@ class LLMResponse:
 
 
 def _call_nemotron(prompt: str, response_mime_type: Optional[str] = None) -> LLMResponse:
-    api_key = os.environ.get("NEMOTRON_API_KEY", "")
-    endpoint = os.environ.get("NEMOTRON_ENDPOINT", "http://localhost:8000/v1")
-    model = os.environ.get("NEMOTRON_MODEL", "nemotron-mini")
+    api_key = os.environ.get("FALLBACK_API_KEY", "")
+    endpoint = os.environ.get("FALLBACK_ENDPOINT", "https://api.groq.com/openai/v1")
+    model = os.environ.get("FALLBACK_MODEL", "llama-3.3-70b-versatile")
     if not api_key:
-        return LLMResponse(text="", model_used="nemotron", success=False)
+        return LLMResponse(text="", model_used="fallback", success=False)
     try:
         import openai
         client = openai.OpenAI(api_key=api_key, base_url=endpoint)
@@ -34,10 +34,10 @@ def _call_nemotron(prompt: str, response_mime_type: Optional[str] = None) -> LLM
             kwargs["response_format"] = {"type": "json_object"}
         response = client.chat.completions.create(**kwargs)
         text = response.choices[0].message.content or ""
-        return LLMResponse(text=text, model_used=f"nemotron/{model}", success=True)
+        return LLMResponse(text=text, model_used=f"fallback/{model}", success=True)
     except Exception as e:
-        logger.warning("[LLMRouter] Nemotron call failed: %s", e)
-        return LLMResponse(text="", model_used="nemotron", success=False)
+        logger.warning("[LLMRouter] Fallback call failed: %s", e)
+        return LLMResponse(text="", model_used="fallback", success=False)
 
 
 def _call_gemini(prompt: str, response_mime_type: Optional[str] = None) -> LLMResponse:
