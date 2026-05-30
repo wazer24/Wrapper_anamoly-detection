@@ -130,8 +130,16 @@ jobs:
           rm -rf node_modules
           npm install
 
-      - name: Enable pg_stat_statements and hypopg
+      - name: Install hypopg extension
         run: |
+          # Install hypopg dependencies inside the Docker container
+          CONTAINER_ID=$(docker ps -q -f "ancestor=pgvector/pgvector:pg16" | head -n 1)
+          if [ -n "$CONTAINER_ID" ]; then
+            docker exec $CONTAINER_ID apt-get update
+            docker exec $CONTAINER_ID apt-get install -y postgresql-16-hypopg
+          fi
+          
+          # Enable extensions
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
             CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
           " || echo "pg_stat_statements not available in this image"
