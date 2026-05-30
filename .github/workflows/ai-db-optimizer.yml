@@ -168,14 +168,12 @@ jobs:
       - name: Seed test data
         run: |
           PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 -d testdb -c "
-            INSERT INTO \"Customer\" (email, full_name)
-            SELECT 'user' || g || '@test.com', 'Test User ' || g
-            FROM generate_series(1, 100) g;
-            INSERT INTO \"Order\" (\"customerId\", status, \"createdAt\")
-            SELECT (g % 100) + 1,
-              CASE WHEN g % 3 = 0 THEN 'pending' ELSE 'shipped' END,
-              NOW() - (g || ' hours')::interval
-            FROM generate_series(1, 500) g;
+            INSERT INTO \"Transaction\" (id, total_amount, status, created_at)
+            SELECT gen_random_uuid()::text,
+              (random() * 1000)::float,
+              CASE WHEN g % 3 = 0 THEN 'FAILED' ELSE 'COMPLETED' END,
+              NOW() - (g || ' days')::interval
+            FROM generate_series(1, 1000) g;
           "
 
       - name: Run Agent Test Suite
