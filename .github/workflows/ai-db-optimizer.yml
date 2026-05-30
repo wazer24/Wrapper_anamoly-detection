@@ -124,13 +124,16 @@ jobs:
           cache: 'npm'
 
       - name: Install Node.js dependencies
-        run: npm ci
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
 
       - name: Generate Prisma Client
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
           DIRECT_URL: postgresql://postgres:postgres@localhost:5432/testdb
-        run: npx prisma generate
+        run: |
+          npx prisma generate
 
       - name: Enable pg_stat_statements and hypopg
         run: |
