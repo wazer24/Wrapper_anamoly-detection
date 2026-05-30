@@ -1,13 +1,10 @@
 {
-  "raw_query": "Prisma Order.findMany({\"where\":{\"status\":\"pending\"}})",
-  "query_count": 1,
-  "model": "Order",
-  "operation": "findMany",
-  "duration_ms": 2317.85,
-  "rows_returned": 0,
-  "rows_scanned": null,
-  "payload_size_kb": 0,
-  "timestamp": "2026-05-27T19:26:25.101Z",
-  "baseline_explain": "Latency 2317.9ms detected by Prisma middleware interceptor.",
-  "intercepted_code": "See server.ts — N+1 loop pattern."
+  "raw_query": "500",
+  "query_count": 501,
+  "baseline_explain": {
+    "Analysis": "Submitted via Streamlit dashboard.",
+    "Execution Time": 1250,
+    "Execution Time Unit": "ms"
+  },
+  "intercepted_code": "Submitted manually via the AI DB Optimizer dashboard."
 }

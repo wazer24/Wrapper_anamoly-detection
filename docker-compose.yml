@@ -80,8 +80,9 @@ services:
       TEMPORAL_HOST: temporal:7233
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      NEMOTRON_API_KEY: ${NEMOTRON_API_KEY:-}
-      NEMOTRON_ENDPOINT: ${NEMOTRON_ENDPOINT:-http://nemotron:8000/v1}
+      FALLBACK_API_KEY: ${GROQ_API_KEY:-}
+      FALLBACK_ENDPOINT: "https://api.groq.com/openai/v1"
+      FALLBACK_MODEL: "llama-3.3-70b-versatile"
     depends_on:
       redis:
         condition: service_healthy

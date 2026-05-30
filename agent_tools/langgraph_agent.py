@@ -8,8 +8,13 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 from pathlib import Path
 
+from dotenv import load_dotenv
+from agent_tools.llm_router import generate
+
+load_dotenv()
+
 _HYPOPG_CALL_RE = re.compile(
-    r"SELECT\s+hypopg_create_index\('CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?ON\s+(\w+)\s+\((.+?)\)\s*(USING\s+(\w+))?\s*'\)",
+    r"SELECT\s+(?:\*\s+FROM\s+)?hypopg_create_index\('CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?ON\s+[\"\']?(\w+)[\"\']?\s+\((.+?)\)\s*(USING\s+(\w+))?\s*'\)",
     re.IGNORECASE | re.DOTALL,
 )
 _SAFE_EXPLAIN_RE = re.compile(r'^\s*(SELECT|WITH|TABLE|VALUES)\s', re.IGNORECASE)
@@ -191,26 +196,13 @@ def agent_reasoning_loop(state: AgentState):
     explain_plan = state.get("explain_plan", {})
     table_stats = state.get("table_stats", {})
 
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        logger.warning("[Node 3] No GEMINI_API_KEY set. Returning fallback hypothesis.")
-        return _fallback_hypothesis(query_text, iteration)
+    prompt = _build_prompt(query_text, schema_context, explain_plan, table_stats)
 
     try:
-        import google.genai as genai
-        from google.genai import types
-        client = genai.Client(api_key=api_key)
-
-        prompt = _build_prompt(query_text, schema_context, explain_plan, table_stats)
-
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
-            ),
-        )
+        response = generate(prompt, response_mime_type="application/json")
+        if not response.success:
+            logger.warning("[Node 3] LLM Router returned unsuccessful response, using fallback.")
+            return _fallback_hypothesis(query_text, iteration)
 
         result = json.loads(response.text)
         hypotheses = result.get("hypotheses", [])
@@ -224,12 +216,12 @@ def agent_reasoning_loop(state: AgentState):
 
         return {"current_iteration": iteration, "hypotheses": hypotheses, "proposed_fix": proposed_fix}
     except Exception as e:
-        logger.error(f"[Node 3] LLM invocation failed: {e}")
+        logger.error(f"[Node 3] LLM Router invocation failed: {e}")
         return _fallback_hypothesis(query_text, iteration)
 
 def _fallback_hypothesis(query_text: str, iteration: int):
     is_n_plus_1 = (
-        "findUnique" in query_text and ("for" in query_text.lower() or "map" in query_text.lower() or "loop" in query_text.lower())
+        "findUnique" in query_text
     ) or (
         "findMany" in query_text and "findUnique" in query_text
     ) or (
@@ -269,11 +261,14 @@ def _safe_execute_hypopg(cursor, hypopg_call: str) -> None:
         raise ValueError(f"Invalid hypopg_call format: {hypopg_call[:80]}")
     unique = (match.group(1) or "").strip()
     concurrently = (match.group(2) or "").strip()
-    table_name = match.group(3)
+    table_name = match.group(3).replace('"', '').replace("'", "")
     columns_str = match.group(4)
     index_type = (match.group(6) or "btree").strip()
     _validate_identifier(table_name, "table name")
-    cols = [c.strip() for c in columns_str.split(",")]
+    
+    # Strip quotes and spaces from each column name before validation
+    cols = [c.strip().replace('"', '').replace("'", "") for c in columns_str.split(",")]
+    
     for c in cols:
         _validate_identifier(c, "column name")
     _validate_identifier(index_type, "index type")
@@ -288,7 +283,7 @@ def _safe_execute_hypopg(cursor, hypopg_call: str) -> None:
         parts.append(concurrently)
     parts.extend(["ON", "{}", "USING", "{}", "({})"])
     create_stmt = pysql.SQL(" ".join(parts)).format(safe_table, safe_type, safe_cols)
-    hypopg_sql = pysql.SQL("SELECT hypopg_create_index({})").format(pysql.Literal(str(create_stmt)))
+    hypopg_sql = pysql.SQL("SELECT hypopg_create_index({})").format(pysql.Literal(create_stmt.as_string(cursor)))
     cursor.execute(hypopg_sql)
 
 
@@ -381,9 +376,77 @@ def confidence_gate(state: AgentState):
     proposed_fix = state.get("proposed_fix", "")
     if not proposed_fix:
         return {"risk_level": 1}
-    if "include" in proposed_fix.lower() or "select" in proposed_fix.lower():
+    
+    # Determine fix type from proposed fix (same logic as auto_apply_fix)
+    fix_type = "index_addition"
+    lowered = proposed_fix.lower()
+    if "include" in lowered or "eager" in lowered:
+        fix_type = "code_rewrite"
+    elif "schema" in lowered or "model" in lowered:
+        fix_type = "schema_change"
+    
+    # Map fix types to risk levels
+    if fix_type in ["schema_change", "code_rewrite"]:
+        # These modify application logic or schema - higher risk
         return {"risk_level": 2}
-    return {"risk_level": 1}
+    elif fix_type == "index_addition":
+        # Index creation is generally lower risk
+        return {"risk_level": 1}
+    else:
+        # Default to medium risk for unknown types
+        return {"risk_level": 2}
+
+
+def orm_translator(state: AgentState):
+    from agent_tools.llm_router import generate
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info("[Node 5.5] Translating fix into detailed Prisma Markdown...")
+    
+    short_fix = state.get("proposed_fix", "")
+    query_text = state.get("query_text", "")
+    schema = state.get("schema_context", "")
+    
+    if not short_fix:
+        return {}
+
+    prompt = f"""
+    You are a Senior Database & Prisma ORM Expert writing a Pull Request description.
+    
+    The AI has diagnosed the following slow query:
+    {query_text}
+    
+    The Prisma Schema context is:
+    {schema}
+    
+    The proposed solution is:
+    "{short_fix}"
+    
+    TASK:
+    Expand this short solution into a highly detailed, professional Markdown report. 
+    It must include:
+    1. A short explanation of WHY the original query was slow.
+    2. A Prisma ORM code block (e.g. `prisma.model.findMany(...)`) showing exactly how to rewrite the code (if applicable).
+    3. A Prisma Schema code block showing exact `@@index` additions (if applicable).
+    4. Format it beautifully with markdown headers and emojis.
+    
+    Return ONLY the raw markdown text. Do not wrap it in JSON.
+    """
+    
+    try:
+        # Call the LLM router (Gemini/Groq/Nemotron) to generate the markdown
+        response = generate(prompt, response_mime_type="text")
+        
+        # Overwrite the short fix with the beautiful markdown report
+        if response.success:
+            return {"proposed_fix": response.text}
+        else:
+            logger.warning("[Node 5.5] LLM Router returned unsuccessful response, keeping short fix.")
+            return {}
+    except Exception as e:
+        logger.error(f"[Node 5.5] ORM Translation failed: {e}")
+        return {}  # If it fails, just keep the short fix
 
 # ---- New Node 6: Auto-Apply (low-risk fixes) ----
 
@@ -476,7 +539,7 @@ def _generate_embedding(text: str):
         import google.genai as genai
         client = genai.Client(api_key=api_key)
         result = client.models.embed_content(
-            model="text-embedding-004",
+            model="gemini-embedding-exp-03-07",
             contents=text,
         )
         return result.embeddings[0].values
@@ -537,6 +600,7 @@ workflow.add_node("check_memory", check_memory)
 workflow.add_node("agent_reasoning_loop", agent_reasoning_loop)
 workflow.add_node("validate_hypothesis", validate_hypothesis)
 workflow.add_node("confidence_gate", confidence_gate)
+workflow.add_node("orm_translator", orm_translator)
 workflow.add_node("auto_apply_fix", auto_apply_fix)
 workflow.add_node("request_approval", request_approval)
 
@@ -557,8 +621,12 @@ workflow.add_conditional_edges(
     {"confidence_gate": "confidence_gate", "agent_reasoning_loop": "agent_reasoning_loop", END: END},
 )
 
+# Confidence gate goes straight to translator
+workflow.add_edge("confidence_gate", "orm_translator")
+
+# Translator decides where to go based on the risk level
 workflow.add_conditional_edges(
-    "confidence_gate",
+    "orm_translator",
     route_after_gate,
     {"auto_apply_fix": "auto_apply_fix", "request_approval": "request_approval"},
 )

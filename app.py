@@ -18,29 +18,18 @@
 =============================================================================
 """
 
-import json
 import os
-import subprocess
-import sys
-import time
-from datetime import datetime
+import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
+from agent_tools.langgraph_agent import agent_app, write_memory
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Paths — resolved relative to this file so it works inside Docker too
-# ---------------------------------------------------------------------------
+load_dotenv()
+
 ROOT_DIR = Path(__file__).parent
 ARTIFACTS_DIR = ROOT_DIR / "optimization_artifacts"
-INPUT_JSON = ARTIFACTS_DIR / "slow_query_input.json"
-PHASE1_SCRIPT = ARTIFACTS_DIR / "run_phase_1.py"
-PHASE2_SCRIPT = ARTIFACTS_DIR / "run_phase_2.py"
-PHASE3_SCRIPT = ARTIFACTS_DIR / "run_phase_3.py"
-PHASE1_OUTPUT = ARTIFACTS_DIR / "phase_1_output.json"
-PHASE2_OUTPUT = ARTIFACTS_DIR / "phase_2_output.json"
-PHASE3_OUTPUT = ARTIFACTS_DIR / "phase_3_output.json"
-PRISMA_INSTRUCTIONS = ARTIFACTS_DIR / "PRISMA_INSTRUCTIONS.md"
 PRISMA_SCHEMA = ROOT_DIR / "prisma" / "schema.prisma"
 
 # ---------------------------------------------------------------------------
@@ -178,86 +167,6 @@ textarea {
 
 
 # ---------------------------------------------------------------------------
-# Session-state defaults
-# ---------------------------------------------------------------------------
-if "run_history" not in st.session_state:
-    st.session_state.run_history = []
-if "last_run_result" not in st.session_state:
-    st.session_state.last_run_result = None
-
-
-# ---------------------------------------------------------------------------
-# Helper: run a single pipeline phase via subprocess
-# ---------------------------------------------------------------------------
-def _run_phase(script_path: Path, label: str, env: dict) -> dict:
-    """
-    Execute a single phase script and return a result dict with
-    stdout, stderr, return code, and wall-clock duration.
-    """
-    if not script_path.exists():
-        return {
-            "phase": label,
-            "success": False,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"Script not found: {script_path}",
-            "duration_s": 0.0,
-        }
-
-    t0 = time.perf_counter()
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(script_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            env=env,
-            cwd=str(ROOT_DIR),
-        )
-        duration = time.perf_counter() - t0
-        return {
-            "phase": label,
-            "success": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "duration_s": round(duration, 2),
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "phase": label,
-            "success": False,
-            "returncode": -2,
-            "stdout": "",
-            "stderr": "Timed out after 300 seconds.",
-            "duration_s": 300.0,
-        }
-    except Exception as exc:
-        return {
-            "phase": label,
-            "success": False,
-            "returncode": -3,
-            "stdout": "",
-            "stderr": str(exc),
-            "duration_s": round(time.perf_counter() - t0, 2),
-        }
-
-
-# ---------------------------------------------------------------------------
-# Helper: safely read JSON from file
-# ---------------------------------------------------------------------------
-def _read_json(path: Path) -> dict | None:
-    try:
-        if path.exists() and path.stat().st_size > 0:
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
@@ -279,18 +188,7 @@ with st.sidebar:
     """)
 
     if not api_key_present:
-        st.warning("⚠️ `GEMINI_API_KEY` is not set.  Phase 1 will fail unless you export it before launching Streamlit.")
-
-    st.divider()
-    st.markdown("## 📜 Run History")
-
-    if st.session_state.run_history:
-        for i, entry in enumerate(reversed(st.session_state.run_history)):
-            status_icon = "✅" if entry.get("all_success") else "⚠️"
-            ts = entry.get("timestamp", "")
-            st.caption(f"{status_icon}  Run #{len(st.session_state.run_history) - i}  —  {ts}")
-    else:
-        st.caption("_No runs yet._")
+        st.warning("⚠️ `GEMINI_API_KEY` is not set.  The AI agent will fail unless you export it before launching Streamlit.")
 
     st.divider()
     st.markdown(
@@ -371,11 +269,7 @@ with st.expander("⚙️ Advanced Options", expanded=False):
             help="Observed total execution time in milliseconds.",
         )
     with adv_col3:
-        skip_phase2 = st.checkbox(
-            "Skip Phase 2 (HypoPG)",
-            value=False,
-            help="Check this if you don't have a live PostgreSQL instance with HypoPG. Phase 2 will be skipped gracefully.",
-        )
+        pass
 
 st.markdown("")
 run_clicked = st.button("🚀  Optimize Query", use_container_width=True, type="primary")
@@ -385,211 +279,121 @@ run_clicked = st.button("🚀  Optimize Query", use_container_width=True, type="
 # Execution pipeline
 # ---------------------------------------------------------------------------
 if run_clicked:
-    # ── Validation ────────────────────────────────────────────────────────
     if not sql_input.strip():
         st.toast("⚠️ Please paste a SQL query before running.", icon="⚠️")
         st.warning("Please enter a slow SQL query in the left panel.")
         st.stop()
 
-    # ── Build the JSON payload (same schema as Phase 1 expects) ───────────
-    payload = {
-        "raw_query": sql_input.strip(),
-        "query_count": query_count,
-        "baseline_explain": {
-            "Analysis": "Submitted via Streamlit dashboard.",
-            "Execution Time": baseline_ms,
-            "Execution Time Unit": "ms",
-        },
-        "intercepted_code": "Submitted manually via the AI DB Optimizer dashboard.",
-    }
-
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    INPUT_JSON.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # Also write the schema context to prisma/schema.prisma if user pasted one
     if schema_input.strip():
         PRISMA_SCHEMA.parent.mkdir(parents=True, exist_ok=True)
         PRISMA_SCHEMA.write_text(schema_input.strip(), encoding="utf-8")
 
-    # ── Env for subprocesses ──────────────────────────────────────────────
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-
-    # ── Phase execution with progress ─────────────────────────────────────
-    phases = [
-        ("Phase 1 — AI Diagnostician (Gemini)", PHASE1_SCRIPT, False),
-        ("Phase 2 — HypoPG Cost Evaluator", PHASE2_SCRIPT, skip_phase2),
-        ("Phase 3 — ORM Translator", PHASE3_SCRIPT, False),
-    ]
-
-    results = []
-    progress_bar = st.progress(0, text="Initializing pipeline…")
-
-    for idx, (label, script, should_skip) in enumerate(phases):
-        step_frac = (idx) / len(phases)
-        progress_bar.progress(step_frac, text=f"Running {label}…")
-
-        if should_skip:
-            results.append({
-                "phase": label,
-                "success": True,
-                "returncode": 0,
-                "stdout": "Skipped by user (no live DB).",
-                "stderr": "",
-                "duration_s": 0.0,
-                "skipped": True,
-            })
-            continue
-
-        with st.spinner(f"⏳ {label}"):
-            result = _run_phase(script, label, env)
-            results.append(result)
-
-        if not result["success"]:
-            progress_bar.progress(
-                (idx + 1) / len(phases),
-                text=f"❌ {label} failed — subsequent phases may be affected.",
-            )
-            # Don't hard-stop: let remaining phases attempt (they have their own error handling)
-
-    progress_bar.progress(1.0, text="✅ Pipeline complete!")
-    time.sleep(0.3)
-    progress_bar.empty()
-
-    # ── Record history ────────────────────────────────────────────────────
-    run_record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "query_preview": sql_input.strip()[:80],
-        "all_success": all(r["success"] for r in results),
-        "phases": results,
+    initial_state = {
+        "tenant_id": "streamlit_user",
+        "query_text": sql_input.strip(),
+        "params": {},
+        "duration_ms": str(baseline_ms),
+        "schema_context": schema_input.strip(),
+        "table_stats": {},
+        "explain_plan": {},
+        "hypotheses": [],
+        "current_iteration": 0,
+        "memory_match_found": False,
+        "memory_match_id": None,
+        "proposed_fix": "",
+        "validated_cost_reduction": 0.0,
+        "risk_level": 0,
+        "approval_status": "PENDING",
+        "approval_request_id": None,
     }
-    st.session_state.run_history.append(run_record)
-    st.session_state.last_run_result = run_record
+    thread_config = {"configurable": {"thread_id": str(uuid.uuid4())}}
 
-    # ── Results section ───────────────────────────────────────────────────
+    with st.status("🧠 AI Agent Thinking...", expanded=True) as status:
+        for event in agent_app.stream(initial_state, thread_config):
+            for node_name, state_update in event.items():
+                st.write(f"✅ Completed: **{node_name}**")
+        status.update(label="✅ Optimization Complete!", state="complete", expanded=False)
+
+    try:
+        final_state = agent_app.get_state(thread_config).values
+    except Exception:
+        final_state = None
+
+    if final_state:
+        try:
+            write_memory(final_state)
+        except Exception:
+            pass
+
     st.divider()
-    st.markdown("## 📊 Pipeline Results")
+    st.markdown("## 📊 Optimization Results")
 
-    # Stat cards row
-    total_time = sum(r["duration_s"] for r in results)
-    phases_passed = sum(1 for r in results if r["success"])
-    phases_total = len(results)
+    reduction = final_state.get("validated_cost_reduction", 0.0) if final_state else 0.0
+    hypotheses = final_state.get("hypotheses", []) if final_state else []
+    root_cause = hypotheses[0].get("label", "Unknown") if hypotheses else "Unknown"
+    latency_reduction = f"{reduction:.1f}%"
+    memory_status = "Memory Hit! 🚀" if (final_state and final_state.get("memory_match_found")) else "Fresh Analysis"
+    approval = final_state.get("approval_status", "N/A") if final_state else "N/A"
 
     sc1, sc2, sc3, sc4 = st.columns(4)
     with sc1:
         st.markdown(f"""
         <div class="stat-card">
-            <div class="value">{phases_passed}/{phases_total}</div>
-            <div class="label">Phases Passed</div>
+            <div class="value">{latency_reduction}</div>
+            <div class="label">Latency Reduction</div>
         </div>
         """, unsafe_allow_html=True)
     with sc2:
         st.markdown(f"""
         <div class="stat-card">
-            <div class="value">{total_time:.1f}s</div>
-            <div class="label">Total Runtime</div>
+            <div class="value" style="font-size:1rem;">{root_cause}</div>
+            <div class="label">Root Cause</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with sc3:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="value" style="font-size:1rem;">{memory_status}</div>
+            <div class="label">Analysis Source</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with sc4:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="value" style="font-size:1rem;">{approval}</div>
+            <div class="label">Approval Status</div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Pull stats from Phase 1 output if available
-    p1_data = _read_json(PHASE1_OUTPUT)
-    if p1_data:
-        root_cause = p1_data.get("diagnosis", {}).get("root_cause_category", "—")
-        latency_drop = p1_data.get("winning_hypothesis", {}).get("latency_reduction_pct", "—")
-        with sc3:
-            display_cause = root_cause.replace("_", " ").title() if isinstance(root_cause, str) else root_cause
-            st.markdown(f"""
-            <div class="stat-card">
-                <div class="value" style="font-size:1rem;">{display_cause}</div>
-                <div class="label">Root Cause</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with sc4:
-            st.markdown(f"""
-            <div class="stat-card">
-                <div class="value">{latency_drop}%</div>
-                <div class="label">Latency Reduction</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        with sc3:
-            st.markdown("""
-            <div class="stat-card">
-                <div class="value">—</div>
-                <div class="label">Root Cause</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with sc4:
-            st.markdown("""
-            <div class="stat-card">
-                <div class="value">—</div>
-                <div class="label">Latency Reduction</div>
-            </div>
-            """, unsafe_allow_html=True)
-
     st.markdown("")
 
-    # Phase-level expanders with stdout/stderr
-    for r in results:
-        skipped = r.get("skipped", False)
-        if skipped:
-            icon = "⏭️"
-            status_text = "SKIPPED"
-        elif r["success"]:
-            icon = "✅"
-            status_text = f"OK  ({r['duration_s']}s)"
-        else:
-            icon = "❌"
-            status_text = f"FAILED  (exit {r['returncode']})"
-
-        with st.expander(f"{icon}  {r['phase']}  —  {status_text}", expanded=not r["success"] and not skipped):
-            if r["stdout"].strip():
-                st.code(r["stdout"], language="text")
-            if r["stderr"].strip():
-                st.error(f"**stderr:**\n```\n{r['stderr']}\n```")
-            if skipped:
-                st.info("This phase was skipped because the *Skip Phase 2* option was enabled.")
-
-    # ── Rendered optimization report ──────────────────────────────────────
-    st.divider()
-    st.markdown("## 📋 AI Optimization Report")
-
-    if PRISMA_INSTRUCTIONS.exists() and PRISMA_INSTRUCTIONS.stat().st_size > 0:
-        try:
-            report_md = PRISMA_INSTRUCTIONS.read_text(encoding="utf-8")
-            st.markdown(
-                '<div class="glass-card">',
-                unsafe_allow_html=True,
-            )
-            st.markdown(report_md)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            # Download button
-            st.download_button(
-                label="⬇️  Download PRISMA_INSTRUCTIONS.md",
-                data=report_md,
-                file_name="PRISMA_INSTRUCTIONS.md",
-                mime="text/markdown",
-            )
-        except Exception as exc:
-            st.error(f"Failed to read optimization report: {exc}")
-    else:
-        st.warning(
-            "No `PRISMA_INSTRUCTIONS.md` was generated.  "
-            "Check the phase logs above for errors."
+    proposed_fix = final_state.get("proposed_fix", "") if final_state else ""
+    if proposed_fix:
+        st.divider()
+        st.markdown("## 📋 Proposed Fix")
+        st.markdown(
+            '<div class="glass-card">',
+            unsafe_allow_html=True,
         )
+        st.markdown(proposed_fix)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Raw JSON artifacts (collapsible) ──────────────────────────────────
-    with st.expander("🔬 Raw Phase Artifacts (JSON)", expanded=False):
-        tab1, tab2, tab3 = st.tabs(["Phase 1 Output", "Phase 2 Output", "Phase 3 Output"])
-        with tab1:
-            d = _read_json(PHASE1_OUTPUT)
-            st.json(d if d else {"status": "not available"})
-        with tab2:
-            d = _read_json(PHASE2_OUTPUT)
-            st.json(d if d else {"status": "not available"})
-        with tab3:
-            d = _read_json(PHASE3_OUTPUT)
-            st.json(d if d else {"status": "not available"})
+        st.download_button(
+            label="⬇️  Download Proposed Fix",
+            data=proposed_fix,
+            file_name="proposed_fix.md",
+            mime="text/markdown",
+        )
+    else:
+        st.warning("No fix was proposed by the agent.")
+
+    with st.expander("🔬 Raw Agent State (JSON)", expanded=False):
+        if final_state:
+            st.json(final_state)
+        else:
+            st.json({"status": "not available"})
 
 # ---------------------------------------------------------------------------
 # Footer — always visible
