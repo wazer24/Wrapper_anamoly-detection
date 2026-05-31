@@ -1,6 +1,6 @@
 # Autonomous Database Optimizer
 
-A self-healing database pipeline for Node.js / Prisma applications on PostgreSQL that intercepts slow queries, diagnoses root causes with AI, mathematically proves fixes, and auto-commits them to your codebase — all without human intervention.
+A self-healing database pipeline for Node.js / Prisma applications on PostgreSQL that intercepts slow queries, diagnoses root causes with AI, mathematically proves fixes, and generates ready‑to‑review Prisma schema changes and a detailed PR report — all with a human in the loop.
 
 ---
 
@@ -8,38 +8,48 @@ A self-healing database pipeline for Node.js / Prisma applications on PostgreSQL
 
 ```mermaid
 flowchart TB
-    subgraph INGESTION["Telemetry Ingestion"]
-        A["Prisma Middleware\n(server.ts)"] -->|"rows_returned\npayload_size_kb\nduration_ms"| C["slow_query_input.json"]
-        B["pg_stat_statements Daemon\n(always_on_dba.py)"] -->|"rows_scanned\nshared_blks_read\nmean_exec_time"| C
+    subgraph OBSERVE["Observe"]
+        direction LR
+        A[Prisma Middleware] --> C[(slow_query_input.json)]
+        B[pg_stat_statements Daemon] --> C
     end
 
-    subgraph BRAIN["Decision Engine"]
-        C --> D{"Deterministic\nGatekeeper"}
-        D -->|"Over-fetch or\nSevere Scan"| E["Instant Bypass\n(No LLM Call)"]
-        D -->|"Complex Query"| F["Gemini 2.5 Flash\nAI Diagnostician"]
-        E --> G["Structured Diagnosis JSON"]
+    subgraph DIAGNOSE["Diagnose"]
+        direction LR
+        D{Gatekeeper}
+        D -->|Over-fetch / Severe Scan| E[Instant Bypass]
+        D -->|Complex Query| F(Light LLM Model)
+        E --> G[(Diagnosis JSON)]
         F --> G
     end
 
-    subgraph PROOF["Mathematical Proof"]
-        G --> H{"Is Database\nIndex Fix?"}
-        H -->|"Yes"| I["HypoPG\nVirtual Index"]
-        I --> J["Re-run EXPLAIN\nProve Cost Reduction"]
-        H -->|"No (App Code)"| K["ORM Translator"]
+    subgraph VALIDATE["Validate"]
+        direction LR
+        H{Is DB Index Fix?}
+        H -->|Yes| I[HypoPG Virtual Index]
+        I --> J[Re-run EXPLAIN]
+        H -->|No| K[ORM Translator]
         J --> K
     end
 
-    subgraph DEPLOY["Self-Healing Deployment"]
-        K --> L["PRISMA_INSTRUCTIONS.md"]
-        K --> M[".patch File"]
-        M --> N["git apply + auto-commit"]
-        N --> O["Push to PR Branch"]
+    subgraph REPORT["Report"]
+        direction LR
+        L[(Prisma Schema Fix)]
+        M[(Markdown PR Report)]
+        N[Human Review Gate]
     end
 
-    style INGESTION fill:#1a1a2e,stroke:#e94560,color:#fff
-    style BRAIN fill:#1a1a2e,stroke:#0f3460,color:#fff
-    style PROOF fill:#1a1a2e,stroke:#16213e,color:#fff
-    style DEPLOY fill:#1a1a2e,stroke:#533483,color:#fff
+    OBSERVE --> DIAGNOSE
+    DIAGNOSE --> VALIDATE
+    VALIDATE --> REPORT
+    K --> L
+    K --> M
+    M --> N
+
+    style OBSERVE fill:#f0f9ff,stroke:#0284c7,color:#0f172a
+    style DIAGNOSE fill:#fff7ed,stroke:#ea580c,color:#0f172a
+    style VALIDATE fill:#f0fdf4,stroke:#16a34a,color:#0f172a
+    style REPORT fill:#faf5ff,stroke:#9333ea,color:#0f172a
 ```
 
 ---
@@ -65,20 +75,34 @@ Before burning LLM tokens, every payload passes through a rule-based filter. If 
 
 ```mermaid
 flowchart LR
-    P["Telemetry\nPayload"] --> Q{"payload_size > 250KB\nAND rows < 50?"}
-    Q -->|"Yes"| R["APPLICATION_OVER_FETCHING\nFix: Prisma select: {}"]
-    Q -->|"No"| S{"rows_scanned > 10,000\nAND rows < 100?"}
-    S -->|"Yes"| T["MISSING_INDEX\nFix: CREATE INDEX"]
-    S -->|"No"| U["Pass to Gemini AI"]
+    subgraph GATEKEEPER["Deterministic Gatekeeper"]
+        direction LR
+        P[/"Telemetry Payload"\]
+        Q{"payload_size > 250KB\nAND rows < 50?"}
+        S{"rows_scanned > 10,000\nAND rows < 100?"}
+        R["APPLICATION_OVER_FETCHING\nFix: Prisma select: {}"]
+        T["MISSING_INDEX\nFix: CREATE INDEX"]
+        U["Pass to LLM\n(Complex Query)"]
 
-    style R fill:#e94560,color:#fff
-    style T fill:#e94560,color:#fff
-    style U fill:#0f3460,color:#fff
+        P --> Q
+        Q -->|Yes| R
+        Q -->|No| S
+        S -->|Yes| T
+        S -->|No| U
+    end
+
+    style GATEKEEPER fill:#f8fafc,stroke:#94a3b8,color:#0f172a
+    style P fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    style Q fill:#ffffff,stroke:#94a3b8,color:#0f172a
+    style S fill:#ffffff,stroke:#94a3b8,color:#0f172a
+    style R fill:#fee2e2,stroke:#dc2626,color:#991b1b
+    style T fill:#fee2e2,stroke:#dc2626,color:#991b1b
+    style U fill:#e0e7ff,stroke:#4f46e5,color:#1e1b4b
 ```
 
 ### 3. AI Diagnostician
 
-When the Gatekeeper can't resolve the issue deterministically, the full query payload and your Prisma schema are sent to **Google Gemini 2.5 Flash**. The model returns a Pydantic-validated JSON diagnosis containing:
+When the Gatekeeper can't resolve the issue deterministically, the full query payload and your Prisma schema are sent to a **lightweight LLM** (e.g., Gemini Flash, Llama 3, Mistral). The model returns a Pydantic-validated JSON diagnosis containing:
 
 - Root cause classification (`MISSING_INDEX`, `N_PLUS_1`, `FULL_TABLE_SCAN`, `SUBOPTIMAL_JOIN`)
 - Multiple ranked hypotheses with SQL equivalents
@@ -105,9 +129,15 @@ flowchart LR
     style AFTER fill:#00b894,color:#fff
 ```
 
-### 5. Self-Healing Auto-Commit
+### 5. Human-Reviewed Report Generation
 
-Once a fix is mathematically proven, the raw SQL is translated into Prisma-native code and written as a `.patch` file. In the CI/CD environment, a GitHub Action automatically applies the patch, commits as `github-actions[bot]`, and pushes the fix directly to the developer's PR branch.
+Once a fix is mathematically proven, the raw SQL is translated into a **concrete Prisma schema fix** and a **detailed Markdown PR report**. The report includes:
+
+- Before/after latency metrics
+- The exact Prisma code changes
+- A plain‑English explanation of why the fix works
+
+All changes sit behind a **Human Review Gate** — nothing is applied automatically. The developer can inspect the fix, run it locally, and manually merge. An upcoming feature will optionally auto‑create a PR branch for review.
 
 ---
 
@@ -124,16 +154,16 @@ The table below shows real latency reductions observed during testing across dif
 
 ---
 
-## Pipeline Decision Flow
+## End-to-End Flow
 
-This diagram shows the complete end-to-end flow from query interception to auto-fix deployment.
+This diagram shows the complete flow from query interception to human review.
 
 ```mermaid
 sequenceDiagram
     participant App as Express Server
     participant MW as Prisma Middleware
     participant GK as Gatekeeper
-    participant AI as Gemini 2.5 Flash
+    participant AI as Light LLM Model
     participant HP as HypoPG Engine
     participant GH as GitHub Actions
 
@@ -155,9 +185,9 @@ sequenceDiagram
         HP-->>GK: Return validated hypothesis
     end
 
-    GK->>GH: Write .patch + PRISMA_INSTRUCTIONS.md
-    GH->>GH: git apply, commit, push to PR branch
-    GH-->>App: Post optimization report on PR
+    GK->>GH: Generate Prisma Schema Fix + Markdown PR Report
+    GH->>GH: Create PR with proposed changes
+    GH-->>App: Open PR for human review (Human Review Gate)
 ```
 
 ---
@@ -166,12 +196,12 @@ sequenceDiagram
 
 | Layer | Technology |
 |---|---|
-| AI Engine | Google Gemini 2.5 Flash (`google-genai` SDK) |
+| AI Engine | Lightweight LLM (Gemini Flash, Llama 3, Mistral, etc.) via `google-genai` or compatible SDK |
 | Database | PostgreSQL + `pg_stat_statements` + `hypopg` |
 | ORM | Prisma Client v5.22.0 |
 | Server | Express.js / TypeScript |
 | Orchestration | Python 3.11 |
-| CI/CD | GitHub Actions (Autonomous Bot) |
+| CI/CD | GitHub Actions (optional PR creation) |
 
 ---
 
@@ -182,6 +212,7 @@ sequenceDiagram
 ```bash
 # Python
 pip install -U google-genai pydantic psycopg2-binary tabulate colorama requests
+# (For other LLMs, install the appropriate SDK and set the API key accordingly)
 
 # Node.js
 npm install
@@ -191,9 +222,11 @@ npx prisma generate
 ### Environment Variables
 
 ```bash
-export GEMINI_API_KEY="your_api_key_here"
+export LLM_API_KEY="your_api_key_here"       # used by the diagnostician
 export DATABASE_URL="postgresql://postgres@localhost:5432/postgres"
 ```
+
+> **Note:** If you’re using Gemini, the variable can be `GEMINI_API_KEY`; adjust your Python scripts accordingly.
 
 ### Quick Start
 
@@ -204,8 +237,9 @@ npx ts-node server.ts
 # 2. Trigger the N+1 bottleneck
 curl http://localhost:3000/api/posts
 
-# 3. View the AI-generated fix
+# 3. View the AI-generated fix and report
 cat optimization_artifacts/PRISMA_INSTRUCTIONS.md
+cat optimization_artifacts/PR_REPORT.md
 
 # 4. Compare with the optimized endpoint
 curl http://localhost:3000/api/posts/optimized
@@ -213,13 +247,13 @@ curl http://localhost:3000/api/posts/optimized
 
 ---
 
-## GitHub Actions Setup
+## GitHub Actions Setup (Optional)
 
 1. Go to your repo → **Settings** → **Secrets** → **Actions**
-2. Add `GEMINI_API_KEY` as a repository secret
-3. Push code — the workflow triggers automatically on every PR touching backend files
+2. Add `LLM_API_KEY` as a repository secret
+3. Push code — the workflow can be triggered on PRs to post the optimization report automatically
 
-The bot will post a structured optimization report directly on your Pull Request with before/after latency metrics and expandable fix instructions.
+The bot will comment on the Pull Request with a structured report, before/after metrics, and the proposed Prisma schema fix — all behind the human review gate.
 
 ---
 
@@ -228,16 +262,27 @@ The bot will post a structured optimization report directly on your Pull Request
 ```
 .
 ├── .github/workflows/
-│   └── ai-db-optimizer.yml          # Autonomous CI/CD agent
+│   └── ai-db-optimizer.yml          # Optional PR‑posting agent
+├── agent_tools/
+│   ├── langgraph_agent.py           # 7-node LangGraph pipeline
+│   ├── guardrail.py                 # Security validation filter
+│   └── llm_router.py                # Dual-LLM fallback logic
 ├── optimization_artifacts/
-│   ├── run_phase_1.py               # AI Diagnostician + Gatekeeper
+│   ├── run_phase_1.py               # AI Diagnostician
 │   ├── run_phase_2.py               # HypoPG virtual index evaluator
 │   ├── run_phase_3.py               # ORM Translator
-│   └── slow_query_input.json        # Intercepted telemetry payload
+│   ├── slow_query_input.json        # Intercepted telemetry payload
+│   ├── PRISMA_INSTRUCTIONS.md       # Concrete schema fix
+│   └── PR_REPORT.md                 # Human‑readable summary
 ├── prisma/
 │   └── schema.prisma                # Database schema
-├── server.ts                        # Express API with Prisma middleware
-├── always_on_dba.py                 # Production monitoring daemon
-├── seed.ts                          # Test data seeder
-└── package.json
+├── src/
+│   ├── server.ts                    # Express API with Prisma middleware
+│   ├── seed.ts                      # Test data seeder
+│   └── prisma-slow-query-extension.ts # Telemetry interceptor
+├── worker/
+│   └── main.py                      # Background worker daemon
+├── app.py                           # Streamlit UI dashboard
+├── package.json
+└── requirements.txt
 ```
