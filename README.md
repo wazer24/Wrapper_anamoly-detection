@@ -1,4 +1,4 @@
-# Autonomous Database Optimizer
+# Dexter — AI Database Optimizer
 
 A self-healing database pipeline for Node.js / Prisma applications on PostgreSQL that intercepts slow queries, diagnoses root causes with AI, mathematically proves fixes, and generates ready‑to‑review Prisma schema changes and a detailed PR report — all with a human in the loop.
 
