@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 =============================================================================
@@ -47,6 +47,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Dependency guard
@@ -362,7 +363,15 @@ def send_webhook_alert(webhook_url: str, slow_query_row: dict, report_md: str) -
         log_warn("No WEBHOOK_URL configured — skipping alert notification.")
         return
 
-    is_discord = "discord.com" in webhook_url or "discordapp.com" in webhook_url
+    # Parse the URL hostname to avoid incomplete substring sanitization (CWE-20)
+    _DISCORD_HOSTS = {"discord.com", "discordapp.com"}
+    try:
+        _host = urlparse(webhook_url).hostname or ""
+    except Exception:
+        _host = ""
+    is_discord = _host in _DISCORD_HOSTS or any(
+        _host.endswith("." + d) for d in _DISCORD_HOSTS
+    )
 
     try:
         if is_discord:
