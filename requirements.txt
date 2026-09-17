@@ -17,6 +17,7 @@ colorama>=0.4.6
 
 # Phase 5: Always-On DBA Daemon (webhook alerts)
 requests>=2.31.0
+pytest>=8.0.0
 
 # Render Workflows SDK (background task orchestration)
 render_sdk
